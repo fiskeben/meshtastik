@@ -23,6 +23,7 @@ type Device struct {
 	FirmwareVersion string
 	Kind            transport.Kind
 	Owner           *pb.User
+	Position        *pb.Position // own position, reported in the self NodeInfo
 	Config          *pb.LocalConfig
 	ModuleConfig    *pb.LocalModuleConfig
 	Channels        [8]*pb.Channel
@@ -37,7 +38,10 @@ type Device struct {
 
 	RequirePasskey bool     // ignore non-get admin messages without the session passkey
 	IgnoreFields   []string // config paths whose new value is silently dropped when applied
-	RebootOnCommit bool     // after commit: apply, send rebooted, close the link
+	// IgnoreFixedPositionCoords: set_fixed_position turns position.fixed_position
+	// on but keeps the old coordinates.
+	IgnoreFixedPositionCoords bool
+	RebootOnCommit            bool // after commit: apply, send rebooted, close the link
 	// HandshakeReboots: after a commit, answer this many want_config
 	// requests (on any link) with rebooted instead, keeping the link open.
 	HandshakeReboots int
@@ -311,7 +315,7 @@ func (d *Device) handshake(l *link, nonce uint32) bool {
 	msgs = append(msgs,
 		&pb.FromRadio{PayloadVariant: &pb.FromRadio_MyInfo{MyInfo: &pb.MyNodeInfo{MyNodeNum: d.NodeNum}}},
 		&pb.FromRadio{PayloadVariant: &pb.FromRadio_Metadata{Metadata: &pb.DeviceMetadata{FirmwareVersion: d.FirmwareVersion}}},
-		&pb.FromRadio{PayloadVariant: &pb.FromRadio_NodeInfo{NodeInfo: &pb.NodeInfo{Num: d.NodeNum, User: d.Owner}}},
+		&pb.FromRadio{PayloadVariant: &pb.FromRadio_NodeInfo{NodeInfo: &pb.NodeInfo{Num: d.NodeNum, User: d.Owner, Position: d.Position}}},
 	)
 	for _, n := range d.ExtraNodes {
 		msgs = append(msgs, &pb.FromRadio{PayloadVariant: &pb.FromRadio_NodeInfo{NodeInfo: n}})

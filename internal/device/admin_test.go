@@ -260,3 +260,97 @@ func TestApplyFailureBeforeBeginIsNotPartial(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestApplyFixedPositionVerifiesCoordinates(t *testing.T) {
+	d := fakedevice.New()
+	c, _ := openA(t, d, device.Options{})
+	pos := &pb.Position{LatitudeI: new(int32(599_000_000)), LongitudeI: new(int32(107_000_000)), Altitude: new(int32(23))}
+	if _, err := c.Apply(ctxT(t), []device.Change{{FixedPosition: pos}}); err != nil {
+		t.Fatal(err)
+	}
+	if p := c.State().Self().GetPosition(); p.GetLatitudeI() != 599_000_000 || p.GetLongitudeI() != 107_000_000 || p.GetAltitude() != 23 {
+		t.Fatal(p)
+	}
+	n, err := c.Apply(ctxT(t), []device.Change{{FixedPosition: pos}})
+	if err != nil || n != 0 {
+		t.Fatal("same position not a no-op:", n, err)
+	}
+}
+
+func TestApplyFixedPositionIgnoredCoordinates(t *testing.T) {
+	d := fakedevice.New()
+	d.IgnoreFixedPositionCoords = true
+	c, _ := openA(t, d, device.Options{})
+	pos := &pb.Position{LatitudeI: new(int32(599_000_000)), LongitudeI: new(int32(107_000_000)), Altitude: new(int32(23))}
+	_, err := c.Apply(ctxT(t), []device.Change{{FixedPosition: pos}})
+	var ve *device.VerifyError
+	if !errors.As(err, &ve) {
+		t.Fatal(err)
+	}
+	var paths []string
+	for _, m := range ve.Mismatches {
+		paths = append(paths, m.Path)
+	}
+	if strings.Join(paths, ",") != "position.latitude_i,position.longitude_i,position.altitude" {
+		t.Fatal(paths)
+	}
+}
+
+func TestVerifyErrorRedactsPrivateKey(t *testing.T) {
+	d := fakedevice.New()
+	d.Config.Security.PrivateKey = bytes.Repeat([]byte{0xaa}, 32)
+	d.IgnoreFields = []string{"security.private_key"}
+	c, _ := openA(t, d, device.Options{})
+	sec := &pb.Config_SecurityConfig{SerialEnabled: true, PrivateKey: bytes.Repeat([]byte{0xbb}, 32)}
+	_, err := c.Apply(ctxT(t), []device.Change{{Config: &pb.Config{PayloadVariant: &pb.Config_Security{Security: sec}}}})
+	if err == nil {
+		t.Fatal("no error")
+	}
+	if s := err.Error(); s != "not applied by the node:\n  security.private_key: want <redacted>, got <redacted>" {
+		t.Fatalf("%q", s)
+	}
+}
+
+func TestApplyReconnectFailureSaysCommitted(t *testing.T) {
+	d := fakedevice.New()
+	d.RebootOnCommit = true
+	d.RefuseDialsAfterReboot = true
+	c, _ := openA(t, d, device.Options{ReconnectTimeout: 300 * time.Millisecond})
+	_, err := c.Apply(ctxT(t), []device.Change{lora(5)})
+	if err == nil || !strings.HasPrefix(err.Error(), "changes were committed but could not be verified: node did not come back after reboot within 300ms") {
+		t.Fatal(err)
+	}
+}
+
+func TestManagedRefusal(t *testing.T) {
+	st := &device.State{Config: &pb.LocalConfig{Security: &pb.Config_SecurityConfig{IsManaged: true}, Lora: &pb.Config_LoRaConfig{HopLimit: 3}}}
+	unmanage := device.Change{Config: &pb.Config{PayloadVariant: &pb.Config_Security{Security: &pb.Config_SecurityConfig{}}}}
+	stillManaged := device.Change{Config: &pb.Config{PayloadVariant: &pb.Config_Security{Security: &pb.Config_SecurityConfig{IsManaged: true, SerialEnabled: true}}}}
+	hop := func(n uint32) device.Change {
+		return device.Change{Config: &pb.Config{PayloadVariant: &pb.Config_Lora{Lora: &pb.Config_LoRaConfig{HopLimit: n}}}}
+	}
+	cases := []struct {
+		changes []device.Change
+		refused bool
+	}{
+		{[]device.Change{unmanage}, false},
+		{[]device.Change{hop(3)}, false}, // no-op
+		{[]device.Change{hop(5)}, true},
+		{[]device.Change{unmanage, hop(5)}, true},
+		{[]device.Change{stillManaged}, true},
+		{[]device.Change{{Owner: &pb.User{LongName: "x", ShortName: "x"}}}, true},
+	}
+	for i, c := range cases {
+		err := device.ManagedRefusal(st, c.changes)
+		if (err != nil) != c.refused {
+			t.Errorf("case %d: %v", i, err)
+		}
+		if err != nil && err.Error() != "node is managed (security.is_managed); local configuration changes are ignored by the firmware" {
+			t.Errorf("case %d: %q", i, err)
+		}
+	}
+	st.Config.Security.IsManaged = false
+	if err := device.ManagedRefusal(st, []device.Change{hop(5)}); err != nil {
+		t.Fatal(err)
+	}
+}

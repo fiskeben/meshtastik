@@ -187,14 +187,15 @@ func (d *Device) applySet(m *pb.AdminMessage) {
 			d.Channels[i] = proto.Clone(v.SetChannel).(*pb.Channel)
 		}
 	case *pb.AdminMessage_SetOwner:
-		u := proto.Clone(d.Owner).(*pb.User)
-		u.LongName, u.ShortName = v.SetOwner.GetLongName(), v.SetOwner.GetShortName()
-		d.Owner = u
+		d.Owner = proto.Clone(v.SetOwner).(*pb.User)
 	case *pb.AdminMessage_SetFixedPosition:
 		if d.Config.Position == nil {
 			d.Config.Position = &pb.Config_PositionConfig{}
 		}
 		d.Config.Position.FixedPosition = true
+		if !d.IgnoreFixedPositionCoords {
+			d.Position = proto.Clone(v.SetFixedPosition).(*pb.Position)
+		}
 	}
 }
 

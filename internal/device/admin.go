@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,11 +31,18 @@ type Mismatch = configpath.FieldDiff
 // VerifyError lists the fields whose read-back value differs from the write.
 type VerifyError struct{ Mismatches []Mismatch }
 
+// privateKeyPath is the one field whose value is never shown in messages.
+const privateKeyPath = "security.private_key"
+
 func (e *VerifyError) Error() string {
 	var b strings.Builder
 	b.WriteString("not applied by the node:")
 	for _, m := range e.Mismatches {
-		fmt.Fprintf(&b, "\n  %s: want %s, got %s", m.Path, m.Want, m.Got)
+		want, got := m.Want, m.Got
+		if m.Path == privateKeyPath {
+			want, got = "<redacted>", "<redacted>"
+		}
+		fmt.Fprintf(&b, "\n  %s: want %s, got %s", m.Path, want, got)
 	}
 	return b.String()
 }
@@ -123,9 +131,24 @@ func (ch Change) diff(s *State) []Mismatch {
 		}
 		return out
 	case ch.FixedPosition != nil:
+		var out []Mismatch
 		if !s.Config.GetPosition().GetFixedPosition() {
-			return []Mismatch{{Path: "position.fixed_position", Want: "true", Got: "false"}}
+			out = append(out, Mismatch{Path: "position.fixed_position", Want: "true", Got: "false"})
 		}
+		cur := s.Self().GetPosition()
+		for _, f := range []struct {
+			path      string
+			want, got int32
+		}{
+			{"position.latitude_i", ch.FixedPosition.GetLatitudeI(), cur.GetLatitudeI()},
+			{"position.longitude_i", ch.FixedPosition.GetLongitudeI(), cur.GetLongitudeI()},
+			{"position.altitude", ch.FixedPosition.GetAltitude(), cur.GetAltitude()},
+		} {
+			if f.want != f.got {
+				out = append(out, Mismatch{Path: f.path, Want: strconv.Itoa(int(f.want)), Got: strconv.Itoa(int(f.got))})
+			}
+		}
+		return out
 	}
 	return nil
 }
@@ -149,15 +172,16 @@ func (ch Change) admin() *pb.AdminMessage {
 
 // Apply writes the changes in one edit transaction, waits for the node to
 // settle (reconnecting if it reboots), and verifies every change by reading
-// the config back. Changes equal to the current state are skipped, except a
-// fixed position, whose coordinates are not part of the read-back. applied
+// the config back. Changes equal to the current state are skipped. applied
 // counts the changes written; it is 0 whenever err is non-nil.
 //
 // ErrPartialEdit boundary: from the moment begin_edit_settings is handed to
 // the connection (including when that send fails, as the frame may have
 // reached the node) until commit_edit_settings has been sent, every failure
 // wraps ErrPartialEdit. Failures before that (validation, fetching the
-// session passkey) and after it (reconnecting, verifying) do not.
+// session passkey) and after it (reconnecting, verifying) do not; a failure
+// to reach the node after the commit says the changes were committed but
+// could not be verified.
 func (c *Client) Apply(ctx context.Context, changes []Change) (applied int, err error) {
 	c.applyMu.Lock()
 	defer c.applyMu.Unlock()
@@ -167,7 +191,7 @@ func (c *Client) Apply(ctx context.Context, changes []Change) (applied int, err 
 		if err := ch.validate(); err != nil {
 			return 0, fmt.Errorf("change %d: %w", i+1, err)
 		}
-		if ch.FixedPosition != nil || len(ch.diff(st)) > 0 {
+		if len(ch.diff(st)) > 0 {
 			todo = append(todo, ch)
 		}
 	}
@@ -198,7 +222,7 @@ func (c *Client) Apply(ctx context.Context, changes []Change) (applied int, err 
 		return partial(err)
 	}
 	if err := c.awaitNode(ctx); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("changes were committed but could not be verified: %w", err)
 	}
 	st = c.State()
 	var mismatches []Mismatch
@@ -226,7 +250,7 @@ func (c *Client) awaitNode(ctx context.Context) error {
 	case <-l.readerEnd:
 		return c.reconnect(ctx)
 	case <-ctx.Done():
-		return fmt.Errorf("after commit: %w", ctx.Err())
+		return ctx.Err()
 	case <-t.C:
 	}
 	err := c.handshake(ctx, l, c.opts.HandshakeTimeout, false)
@@ -234,7 +258,7 @@ func (c *Client) awaitNode(ctx context.Context) error {
 		return nil
 	}
 	if ctx.Err() != nil {
-		return fmt.Errorf("after commit: %w", ctx.Err())
+		return ctx.Err()
 	}
 	fmt.Fprintf(c.opts.Log, "re-read after commit failed (%v); reconnecting\n", err)
 	return c.reconnect(ctx)
