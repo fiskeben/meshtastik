@@ -126,7 +126,11 @@ type app struct {
 }
 
 // connect is the one place commands obtain a client. The caller must Close it.
-func (a *app) connect(cmd *cobra.Command) (*device.Client, error) {
+func (a *app) connect(cmd *cobra.Command) (*device.Client, error) { return a.connectWith(cmd, nil) }
+
+// connectWith is connect with adjust, when set, applied to the client options
+// before Deps.DeviceOptions.
+func (a *app) connectWith(cmd *cobra.Command, adjust func(*device.Options)) (*device.Client, error) {
 	for _, name := range []string{"port", "host", "ble"} {
 		if f := cmd.Flags().Lookup(name); f != nil && f.Changed && f.Value.String() == "" {
 			return nil, fmt.Errorf("--%s must not be empty", name)
@@ -142,6 +146,9 @@ func (a *app) connect(cmd *cobra.Command) (*device.Client, error) {
 	}
 	if a.debug {
 		opts.Log = a.Stderr
+	}
+	if adjust != nil {
+		adjust(&opts)
 	}
 	if a.DeviceOptions != nil {
 		a.DeviceOptions(&opts)

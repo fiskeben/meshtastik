@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
 	"google.golang.org/protobuf/proto"
@@ -52,6 +53,9 @@ type Device struct {
 	RefuseDialsAfterReboot bool
 	// RefuseDials fails every Dial while set.
 	RefuseDials bool
+	// DropAfterHandshake, when non-zero, closes each link this long after it
+	// answers want_config, like another client kicking this one off.
+	DropAfterHandshake time.Duration
 	// Backlog is emitted right after config_complete_id on the first
 	// handshake of the first dial, as a node hands over queued packets.
 	Backlog []*pb.MeshPacket
@@ -281,6 +285,12 @@ func (d *Device) serve(l *link) {
 			}
 			if !d.handshake(l, v.WantConfigId) {
 				return
+			}
+			d.mu.Lock()
+			drop := d.DropAfterHandshake
+			d.mu.Unlock()
+			if drop > 0 {
+				time.AfterFunc(drop, func() { l.close() })
 			}
 		case *pb.ToRadio_Packet:
 			if adm != nil && !d.handleAdmin(l, &st, v.Packet, adm) {

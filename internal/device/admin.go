@@ -246,9 +246,9 @@ func (c *Client) awaitNode(ctx context.Context) error {
 	defer t.Stop()
 	select {
 	case <-l.rebooted:
-		return c.reconnect(ctx, "after reboot")
+		return c.reconnect(ctx, afterReboot)
 	case <-l.readerEnd:
-		return c.reconnect(ctx, "after reboot")
+		return c.reconnect(ctx, afterReboot)
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-t.C:
@@ -261,7 +261,7 @@ func (c *Client) awaitNode(ctx context.Context) error {
 		return ctx.Err()
 	}
 	fmt.Fprintf(c.opts.Log, "re-read after commit failed (%v); reconnecting\n", err)
-	return c.reconnect(ctx, "after reboot")
+	return c.reconnect(ctx, afterReboot)
 }
 
 func (c *Client) sessionPasskey() []byte {

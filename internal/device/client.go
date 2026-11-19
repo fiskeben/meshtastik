@@ -72,6 +72,13 @@ type Options struct {
 	HeartbeatInterval time.Duration // default 5m
 	RebootGrace       time.Duration // default 3s: wait after a commit for the node to reboot
 	Log               io.Writer     // default io.Discard
+
+	// Listen's handling of dropped links (see Listen).
+	StableLink     time.Duration // default 60s: a link that lived shorter counts as short-lived when it drops
+	ReconnectDelay time.Duration // default 1s: wait before redialling after a drop; doubles while links are short-lived
+	// OnReconnect, when set, is called by Listen before each reconnect after
+	// a dropped link, with the cause and the wait before redialling.
+	OnReconnect func(cause error, wait time.Duration)
 }
 
 func (o *Options) defaults() {
@@ -89,6 +96,12 @@ func (o *Options) defaults() {
 	}
 	if o.Log == nil {
 		o.Log = io.Discard
+	}
+	if o.StableLink <= 0 {
+		o.StableLink = 60 * time.Second
+	}
+	if o.ReconnectDelay <= 0 {
+		o.ReconnectDelay = time.Second
 	}
 }
 
@@ -108,6 +121,7 @@ var (
 // goroutines. A reconnect replaces the whole link.
 type link struct {
 	conn   transport.Conn
+	since  time.Time // when the link was attached
 	sendMu sync.Mutex
 
 	readerEnd chan struct{} // closed when the reader goroutine exits
@@ -228,7 +242,7 @@ func Open(ctx context.Context, dial transport.Dialer, opts Options) (*Client, er
 // attach starts the reader and heartbeat on conn and makes it the current link.
 func (c *Client) attach(conn transport.Conn) (*link, error) {
 	ctx, cancel := context.WithCancel(context.Background())
-	l := &link{conn: conn, readerEnd: make(chan struct{}), rebooted: make(chan struct{}, 1), cancel: cancel}
+	l := &link{conn: conn, since: time.Now(), readerEnd: make(chan struct{}), rebooted: make(chan struct{}, 1), cancel: cancel}
 	l.wg.Add(2)
 	go c.readLoop(ctx, l)
 	go c.heartbeatLoop(ctx, l)
@@ -304,10 +318,24 @@ func (c *Client) handshakeOnce(ctx context.Context, l *link, timeout time.Durati
 	}
 }
 
-// reconnect replaces the current link after a reboot or a dropped link
-// (after says which, for messages): it redials with backoff and re-runs the
-// handshake until ReconnectTimeout.
-func (c *Client) reconnect(ctx context.Context, after string) error {
+// reconnectReason says why reconnect runs; it shapes the error messages.
+type reconnectReason int
+
+const (
+	afterReboot reconnectReason = iota // the node rebooted (Apply)
+	afterDrop                          // the link dropped (Listen)
+)
+
+func (r reconnectReason) String() string {
+	if r == afterDrop {
+		return "after the connection dropped"
+	}
+	return "after reboot"
+}
+
+// reconnect replaces the current link after a reboot or a dropped link: it
+// redials with backoff and re-runs the handshake until ReconnectTimeout.
+func (c *Client) reconnect(ctx context.Context, after reconnectReason) error {
 	if l := c.current(); l != nil {
 		l.close()
 	}
@@ -327,7 +355,7 @@ func (c *Client) reconnect(ctx context.Context, after string) error {
 			if ctx.Err() != nil {
 				return fmt.Errorf("waiting for the node %s: %w", after, ctx.Err())
 			}
-			if errors.Is(err, errHandshakeTimeout) {
+			if after == afterReboot && errors.Is(err, errHandshakeTimeout) {
 				err = errHandshakeTimeout // the "another program" hint does not apply mid-reboot
 			}
 			return fmt.Errorf("node did not come back %s within %s: %v", after, c.opts.ReconnectTimeout, err)

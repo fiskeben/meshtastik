@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -89,11 +90,17 @@ type listenJSON struct {
 	FromName  string  `json:"from_name"`
 	To        string  `json:"to"`
 	Channel   uint32  `json:"channel"`
-	Port      string  `json:"port"`
+	Port      string  `json:"port,omitempty"`
 	Text      *string `json:"text,omitempty"`
 	SNR       float32 `json:"snr"`
 	RSSI      int32   `json:"rssi"`
 	Encrypted bool    `json:"encrypted,omitempty"`
+}
+
+// encrypted reports whether p arrived undecoded (the node lacked its key).
+func encrypted(p *pb.MeshPacket) bool {
+	_, ok := p.GetPayloadVariant().(*pb.MeshPacket_Encrypted)
+	return ok
 }
 
 func writeListenJSON(w io.Writer, s *device.State, p *pb.MeshPacket, now time.Time) error {
@@ -104,10 +111,12 @@ func writeListenJSON(w io.Writer, s *device.State, p *pb.MeshPacket, now time.Ti
 		FromName:  s.Nodes[p.GetFrom()].GetUser().GetLongName(),
 		To:        nodeID(p.GetTo()),
 		Channel:   p.GetChannel(),
-		Port:      d.GetPortnum().String(),
 		SNR:       p.GetRxSnr(),
 		RSSI:      p.GetRxRssi(),
-		Encrypted: d == nil,
+		Encrypted: encrypted(p),
+	}
+	if !m.Encrypted {
+		m.Port = d.GetPortnum().String()
 	}
 	if p.GetTo() == device.Broadcast {
 		m.To = "broadcast"
@@ -116,9 +125,36 @@ func writeListenJSON(w io.Writer, s *device.State, p *pb.MeshPacket, now time.Ti
 		t := strings.ToValidUTF8(string(d.GetPayload()), "\uFFFD")
 		m.Text = &t
 	}
-	enc := json.NewEncoder(w)
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
-	return enc.Encode(m) // escapes control characters itself
+	if err := enc.Encode(m); err != nil { // escapes C0 control characters
+		return err
+	}
+	_, err := w.Write(escapeJSONControls(buf.Bytes()))
+	return err
+}
+
+func isDELOrC1(r rune) bool { return r == 0x7f || r >= 0x80 && r <= 0x9f }
+
+// escapeJSONControls replaces DEL and C1 control characters, which
+// encoding/json leaves as they are, with \u escapes. In JSON output they can
+// only occur inside strings, where the escape stands for the same character.
+func escapeJSONControls(b []byte) []byte {
+	if !bytes.ContainsFunc(b, isDELOrC1) {
+		return b
+	}
+	var out bytes.Buffer
+	for len(b) > 0 {
+		r, n := utf8.DecodeRune(b)
+		if isDELOrC1(r) {
+			fmt.Fprintf(&out, `\u%04x`, r)
+		} else {
+			out.Write(b[:n])
+		}
+		b = b[n:]
+	}
+	return out.Bytes()
 }
 
 // humanWriter prints one line per packet, padding the sender and recipient
@@ -142,7 +178,7 @@ func (h *humanWriter) write(s *device.State, p *pb.MeshPacket, now time.Time) er
 	}
 	var body string
 	switch d := p.GetDecoded(); {
-	case d == nil:
+	case encrypted(p):
 		body = "<encrypted>"
 	case d.GetPortnum() == pb.PortNum_TEXT_MESSAGE_APP:
 		body = sanitise(string(d.GetPayload()))
@@ -182,7 +218,11 @@ func newListenCmd(a *app) *cobra.Command {
 			if cmd.Flags().Changed("count") && count < 1 {
 				return errors.New("--count must be at least 1")
 			}
-			c, err := a.connect(cmd)
+			c, err := a.connectWith(cmd, func(o *device.Options) {
+				o.OnReconnect = func(cause error, wait time.Duration) {
+					fmt.Fprintf(a.Stderr, "connection lost (%v); reconnecting in %s\n", cause, wait)
+				}
+			})
 			if err != nil {
 				return err
 			}
@@ -197,7 +237,7 @@ func newListenCmd(a *app) *cobra.Command {
 			printed, dropped := 0, 0
 			err = c.Listen(ctx, func(p *pb.MeshPacket) error {
 				if n := c.DroppedPackets(); n > dropped {
-					fmt.Fprintf(a.Stderr, "note: %d older messages were dropped (buffer full)\n", n-dropped)
+					fmt.Fprintf(a.Stderr, "note: %d older packets were dropped (buffer full)\n", n-dropped)
 					dropped = n
 				}
 				if !f.shows(p) {

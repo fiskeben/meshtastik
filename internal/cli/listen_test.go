@@ -125,6 +125,50 @@ func TestListenAllShowsEncrypted(t *testing.T) {
 	if err != nil || json.Unmarshal([]byte(out), &m) != nil || m["encrypted"] != true {
 		t.Fatal(out, err)
 	}
+	if _, ok := m["port"]; ok {
+		t.Fatal("port present for an encrypted packet", m)
+	}
+}
+
+func TestListenEmptyPacketIsNotEncrypted(t *testing.T) {
+	d := fakedevice.New()
+	d.Backlog = []*pb.MeshPacket{{From: 42, To: 0xffffffff, Id: 9}}
+	out, _, err := runCLI(t, d, "", "listen", "--all", "--count", "1")
+	if err != nil || strings.Contains(out, "encrypted") || !strings.HasSuffix(out, ": [UNKNOWN_APP]\n") {
+		t.Fatal(out, err)
+	}
+}
+
+func TestListenJSONEscapesDELAndC1(t *testing.T) {
+	d := fakedevice.New()
+	d.ExtraNodes = []*pb.NodeInfo{{Num: 42, User: &pb.User{LongName: "Ev\u009bil", ShortName: "EV"}}}
+	d.Backlog = []*pb.MeshPacket{text(42, 0xffffffff, "a\x7fb\u0085c\x1b")}
+	out, _, err := runCLI(t, d, "", "listen", "--json", "--count", "1")
+	var m map[string]any
+	if err != nil || strings.ContainsAny(out, "\x7f\u0085\u009b\x1b") || json.Unmarshal([]byte(out), &m) != nil ||
+		m["text"] != "a\x7fb\u0085c\x1b" || m["from_name"] != "Ev\u009bil" || !strings.Contains(out, `\u009b`) {
+		t.Fatalf("%q %v", out, err)
+	}
+}
+
+func TestListenReportsReconnect(t *testing.T) {
+	d := fakedevice.New()
+	go func() {
+		for d.Dials() < 1 {
+			time.Sleep(5 * time.Millisecond)
+		}
+		time.Sleep(100 * time.Millisecond)
+		d.DropLink()
+		for d.Dials() < 2 {
+			time.Sleep(5 * time.Millisecond)
+		}
+		time.Sleep(100 * time.Millisecond)
+		d.Inject(text(42, 0xffffffff, "back"))
+	}()
+	out, errOut, err := runCLI(t, d, "", "listen", "--count", "1")
+	if err != nil || !strings.Contains(out, ": back") || !strings.Contains(errOut, "connection lost (") || !strings.Contains(errOut, "reconnecting in 10ms") {
+		t.Fatalf("%q %q %v", out, errOut, err)
+	}
 }
 
 func TestListenHidesOwnResponsesByDefault(t *testing.T) {

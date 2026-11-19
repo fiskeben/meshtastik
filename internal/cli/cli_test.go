@@ -28,7 +28,7 @@ func runCLICtx(t *testing.T, ctx context.Context, d *fakedevice.Device, confirm 
 		Stdout:        &out,
 		Stderr:        &errOut,
 		Confirm:       confirm,
-		DeviceOptions: func(o *device.Options) { o.RebootGrace = 50 * time.Millisecond },
+		DeviceOptions: func(o *device.Options) { o.RebootGrace, o.ReconnectDelay = 50*time.Millisecond, 10*time.Millisecond },
 	})
 	root.SetArgs(args)
 	err = root.ExecuteContext(ctx)
