@@ -7,8 +7,10 @@ Requires node firmware 2.5 or newer.
 ## Install
 
 ```
-go build ./cmd/meshtastik
+make build      # ./meshtastik for this machine, version stamped from git
 ```
+
+Other targets: `make test`, `make race`, `make vet`, `make check` (vet + race tests), `make build-all` (binaries for every platform in `dist/`; the macOS one only when run on a Mac), `make clean`. Plain `go build ./cmd/meshtastik` also works.
 
 ### Platforms
 
