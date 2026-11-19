@@ -93,7 +93,7 @@ func defaultDial(f ConnFlags) (transport.Dialer, error) {
 	case transport.KindSerial:
 		return func(ctx context.Context) (transport.Conn, error) { return transport.OpenSerial(ctx, target, nil) }, nil
 	}
-	return nil, errors.New("BLE not available yet")
+	return func(ctx context.Context) (transport.Conn, error) { return transport.DialBLE(ctx, target, nil) }, nil
 }
 
 // defaultHandshakeTimeout is how long to wait for the node's config dump.
@@ -239,6 +239,6 @@ func NewRoot(d Deps) *cobra.Command {
 		},
 	})
 	root.AddCommand(newInfoCmd(a), newNodesCmd(a), newConfigCmd(a), newOwnerCmd(a),
-		newRebootCmd(a), newShutdownCmd(a), newFactoryResetCmd(a), newChannelCmd(a))
+		newRebootCmd(a), newShutdownCmd(a), newFactoryResetCmd(a), newChannelCmd(a), newBLECmd(a))
 	return root
 }
