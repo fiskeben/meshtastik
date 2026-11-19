@@ -7,6 +7,7 @@ import (
 
 	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/dynamicpb"
 )
 
 // Path addresses a config section, or a field inside it.
@@ -107,6 +108,15 @@ func Section(cfg *pb.LocalConfig, mod *pb.LocalModuleConfig, p Path) protoreflec
 func Set(cfg *pb.LocalConfig, mod *pb.LocalModuleConfig, p Path, raw string) error {
 	if p.Field == "" {
 		return fmt.Errorf("%s is a section; set one of its fields", p.Section)
+	}
+	// Validate against a scratch message so a bad value leaves a nil section nil.
+	local := configDesc()
+	if p.Module {
+		local = moduleDesc()
+	}
+	scratch := dynamicpb.NewMessage(local.Fields().ByName(protoreflect.Name(p.Section)).Message())
+	if err := SetField(scratch, p.Field, raw); err != nil {
+		return err
 	}
 	return SetField(Section(cfg, mod, p), p.Field, raw)
 }

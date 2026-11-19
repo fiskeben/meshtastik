@@ -2,8 +2,11 @@ package configpath
 
 import (
 	"fmt"
+	"slices"
+	"strings"
 
 	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
+	"google.golang.org/protobuf/encoding/prototext"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
@@ -54,11 +57,7 @@ func FieldDiffs(prefix string, want, got protoreflect.Message) []FieldDiff {
 		}
 		w, g := want.Get(f), got.Get(f)
 		if f.IsMap() || f.Kind() == protoreflect.MessageKind {
-			if !want.Has(f) && !got.Has(f) {
-				continue
-			}
-			ws, gs := formatOpaque(w), formatOpaque(g)
-			if ws != gs {
+			if ws, gs := formatOpaque(f, w), formatOpaque(f, g); ws != gs {
 				out = append(out, FieldDiff{path, ws, gs})
 			}
 			continue
@@ -70,7 +69,31 @@ func FieldDiffs(prefix string, want, got protoreflect.Message) []FieldDiff {
 	return out
 }
 
-// formatOpaque renders map and repeated-message values for diff output.
-func formatOpaque(v protoreflect.Value) string {
-	return fmt.Sprint(v.Interface())
+// formatOpaque renders repeated-message and map values deterministically:
+// elements via compact prototext joined by ",", map entries sorted by key.
+func formatOpaque(f protoreflect.FieldDescriptor, v protoreflect.Value) string {
+	opts := prototext.MarshalOptions{Multiline: false}
+	msg := func(m protoreflect.Message) string {
+		// Normalise prototext's deliberately unstable spacing.
+		return strings.Join(strings.Fields(opts.Format(m.Interface())), " ")
+	}
+	var parts []string
+	switch {
+	case f.IsList():
+		l := v.List()
+		for i := 0; i < l.Len(); i++ {
+			parts = append(parts, msg(l.Get(i).Message()))
+		}
+	case f.IsMap():
+		v.Map().Range(func(k protoreflect.MapKey, mv protoreflect.Value) bool {
+			val := fmt.Sprint(mv.Interface())
+			if f.MapValue().Message() != nil {
+				val = msg(mv.Message())
+			}
+			parts = append(parts, fmt.Sprint(k.Interface())+"="+val)
+			return true
+		})
+		slices.Sort(parts)
+	}
+	return strings.Join(parts, ",")
 }

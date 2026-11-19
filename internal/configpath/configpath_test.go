@@ -169,3 +169,37 @@ func TestFieldDiffs(t *testing.T) {
 		t.Fatal(d)
 	}
 }
+
+func TestFieldDiffsRepeatedMessages(t *testing.T) {
+	pins := func(nums ...uint32) protoreflect.Message {
+		m := &pb.ModuleConfig_RemoteHardwareConfig{}
+		for _, n := range nums {
+			m.AvailablePins = append(m.AvailablePins, &pb.RemoteHardwarePin{GpioPin: n, Name: "p"})
+		}
+		return m.ProtoReflect()
+	}
+	if d := FieldDiffs("remote_hardware", pins(1, 2), pins(1, 2)); len(d) != 0 {
+		t.Fatal(d)
+	}
+	d := FieldDiffs("remote_hardware", pins(1, 2), pins(1, 3))
+	if len(d) != 1 || d[0].Path != "remote_hardware.available_pins" || d[0].Want == d[0].Got {
+		t.Fatal(d)
+	}
+}
+
+func TestSetFailureDoesNotMutate(t *testing.T) {
+	cfg, mod := &pb.LocalConfig{}, &pb.LocalModuleConfig{}
+	p, _ := Parse("lora.hop_limit")
+	if err := Set(cfg, mod, p, "nope"); err == nil || cfg.Lora != nil {
+		t.Fatalf("%v %v", err, cfg.Lora)
+	}
+	p, _ = Parse("network.ipv4_config.ip")
+	if err := Set(cfg, mod, p, "x"); err == nil || cfg.Network != nil {
+		t.Fatal("nested allocated")
+	}
+	cfg.Security = &pb.Config_SecurityConfig{AdminKey: [][]byte{{1}}}
+	p, _ = Parse("security.admin_key")
+	if err := Set(cfg, mod, p, "base64:AQ==,bad"); err == nil || len(cfg.Security.AdminKey) != 1 {
+		t.Fatal("list emptied")
+	}
+}

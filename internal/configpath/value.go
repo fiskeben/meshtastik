@@ -27,37 +27,47 @@ func walk(m protoreflect.Message, dotted string, mutable bool) (protoreflect.Mes
 }
 
 // SetField parses raw and assigns it to the (possibly dotted) field of m.
+// Nothing is modified (or allocated) unless raw parses.
 func SetField(m protoreflect.Message, field, raw string) error {
-	owner, f, err := walk(m, field, true)
+	fds, err := resolve(m.Descriptor(), field)
 	if err != nil {
 		return err
 	}
+	f := fds[len(fds)-1]
 	if f.IsMap() || f.Kind() == protoreflect.MessageKind || f.Kind() == protoreflect.GroupKind {
 		return fmt.Errorf("field %q is a message; set one of its fields", f.Name())
+	}
+	var vals []protoreflect.Value
+	if f.IsList() {
+		if strings.TrimSpace(raw) != "" {
+			for _, it := range strings.Split(raw, ",") {
+				v, err := parseScalar(f, strings.TrimSpace(it))
+				if err != nil {
+					return fmt.Errorf("%s: %w", f.Name(), err)
+				}
+				vals = append(vals, v)
+			}
+		}
+	} else {
+		v, err := parseScalar(f, raw)
+		if err != nil {
+			return fmt.Errorf("%s: %w", f.Name(), err)
+		}
+		vals = []protoreflect.Value{v}
+	}
+	owner, _, err := walk(m, field, true)
+	if err != nil {
+		return err
 	}
 	if f.IsList() {
 		list := owner.Mutable(f).List()
 		list.Truncate(0)
-		if strings.TrimSpace(raw) == "" {
-			return nil
-		}
-		items := strings.Split(raw, ",")
-		vals := make([]protoreflect.Value, len(items))
-		for i, it := range items {
-			if vals[i], err = parseScalar(f, strings.TrimSpace(it)); err != nil {
-				return fmt.Errorf("%s: %w", f.Name(), err)
-			}
-		}
 		for _, v := range vals {
 			list.Append(v)
 		}
 		return nil
 	}
-	v, err := parseScalar(f, raw)
-	if err != nil {
-		return fmt.Errorf("%s: %w", f.Name(), err)
-	}
-	owner.Set(f, v)
+	owner.Set(f, vals[0])
 	return nil
 }
 
