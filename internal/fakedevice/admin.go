@@ -14,10 +14,11 @@ import (
 // passkey is the admin session passkey the fake hands out.
 var passkey = []byte{0xfa, 0x6e, 0x5e, 0x55, 0x10, 0x4c, 0x0d, 0xe7}
 
-// editTx is the edit transaction state of one link.
-type editTx struct {
-	open    bool
+// linkState is the admin state of one link.
+type linkState struct {
+	open    bool               // edit transaction in progress
 	pending []*pb.AdminMessage // sets buffered until commit
+	hung    bool               // HangOnCommit: read everything, answer nothing
 }
 
 // Received returns copies of every admin message the device has received.
@@ -72,16 +73,19 @@ func oneofName(m proto.Message) string {
 }
 
 // handleAdmin handles admin message m carried by packet p; false closes the link.
-func (d *Device) handleAdmin(l *link, tx *editTx, p *pb.MeshPacket, m *pb.AdminMessage) bool {
+func (d *Device) handleAdmin(l *link, st *linkState, p *pb.MeshPacket, m *pb.AdminMessage) bool {
 	d.mu.Lock()
 	onAdmin, dropAfter, requirePasskey := d.OnAdmin, d.DropAfter, d.RequirePasskey
 	d.mu.Unlock()
 	if onAdmin != nil {
 		onAdmin(m)
 	}
+	if dropAfter != nil && dropAfter(m) {
+		return false
+	}
 	isGet := strings.HasPrefix(oneofName(m), "get_")
 	if !requirePasskey || isGet || bytes.Equal(m.SessionPasskey, passkey) {
-		resp, reboot := d.admin(tx, m)
+		resp, reboot := d.admin(st, m)
 		if resp != nil && !d.reply(l, p, resp) {
 			return false
 		}
@@ -90,12 +94,12 @@ func (d *Device) handleAdmin(l *link, tx *editTx, p *pb.MeshPacket, m *pb.AdminM
 			return false
 		}
 	}
-	return dropAfter == nil || !dropAfter(m)
+	return true
 }
 
 // admin performs m and returns the response to send, if any, and whether the
 // node reboots now. Reboot, shutdown and factory reset are only recorded.
-func (d *Device) admin(tx *editTx, m *pb.AdminMessage) (*pb.AdminMessage, bool) {
+func (d *Device) admin(st *linkState, m *pb.AdminMessage) (*pb.AdminMessage, bool) {
 	switch v := m.PayloadVariant.(type) {
 	case *pb.AdminMessage_GetConfigRequest:
 		return &pb.AdminMessage{PayloadVariant: &pb.AdminMessage_GetConfigResponse{GetConfigResponse: d.configSection(v.GetConfigRequest)}}, false
@@ -108,22 +112,24 @@ func (d *Device) admin(tx *editTx, m *pb.AdminMessage) (*pb.AdminMessage, bool) 
 		d.mu.Unlock()
 		return &pb.AdminMessage{PayloadVariant: &pb.AdminMessage_GetChannelResponse{GetChannelResponse: ch}}, false
 	case *pb.AdminMessage_BeginEditSettings:
-		tx.open, tx.pending = true, nil
+		st.open, st.pending = true, nil
 	case *pb.AdminMessage_CommitEditSettings:
-		for _, s := range tx.pending {
+		for _, s := range st.pending {
 			d.applySet(s)
 		}
-		tx.open, tx.pending = false, nil
+		st.open, st.pending = false, nil
 		d.mu.Lock()
 		defer d.mu.Unlock()
-		if d.RebootOnCommit {
+		d.handshakeReboots = d.HandshakeReboots
+		if d.RebootOnCommit || d.HangOnCommit || d.HandshakeReboots > 0 {
 			d.rebooted = true
-			return nil, true
 		}
+		st.hung = d.HangOnCommit
+		return nil, d.RebootOnCommit
 	case *pb.AdminMessage_SetConfig, *pb.AdminMessage_SetModuleConfig, *pb.AdminMessage_SetChannel,
 		*pb.AdminMessage_SetOwner, *pb.AdminMessage_SetFixedPosition:
-		if tx.open {
-			tx.pending = append(tx.pending, m)
+		if st.open {
+			st.pending = append(st.pending, m)
 		} else {
 			d.applySet(m)
 		}

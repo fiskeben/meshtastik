@@ -70,6 +70,7 @@ type Options struct {
 	HandshakeTimeout  time.Duration // default 15s; also bounds each admin request
 	ReconnectTimeout  time.Duration // default 90s
 	HeartbeatInterval time.Duration // default 5m
+	RebootGrace       time.Duration // default 3s: wait after a commit for the node to reboot
 	Log               io.Writer     // default io.Discard
 }
 
@@ -83,6 +84,9 @@ func (o *Options) defaults() {
 	if o.HeartbeatInterval <= 0 {
 		o.HeartbeatInterval = 5 * time.Minute
 	}
+	if o.RebootGrace <= 0 {
+		o.RebootGrace = 3 * time.Second
+	}
 	if o.Log == nil {
 		o.Log = io.Discard
 	}
@@ -94,7 +98,11 @@ const (
 	maxReconnectBackoff = 5 * time.Second
 )
 
-var errClientClosed = errors.New("client closed")
+var (
+	errClientClosed     = errors.New("client closed")
+	errRebooted         = errors.New("node rebooted during handshake")
+	errHandshakeTimeout = errors.New("no response to handshake")
+)
 
 // link is one physical connection with its own reader and heartbeat
 // goroutines. A reconnect replaces the whole link.
@@ -105,8 +113,7 @@ type link struct {
 	readerEnd chan struct{} // closed when the reader goroutine exits
 	readErr   error         // set before readerEnd closes
 
-	rebooted   chan struct{} // closed when the node reports it rebooted
-	rebootOnce sync.Once
+	rebooted chan struct{} // holds one pending "node rebooted" event; receiving consumes it
 
 	mu       sync.Mutex    // guards nonce and complete
 	nonce    uint32        // of the handshake in progress
@@ -147,17 +154,10 @@ func (l *link) configComplete(id uint32) {
 	}
 }
 
-func (l *link) markRebooted() { l.rebootOnce.Do(func() { close(l.rebooted) }) }
-
-// gone reports whether the node rebooted or the connection ended.
-func (l *link) gone() bool {
+func (l *link) markRebooted() {
 	select {
-	case <-l.rebooted:
-		return true
-	case <-l.readerEnd:
-		return true
-	default:
-		return false
+	case l.rebooted <- struct{}{}:
+	default: // one pending event is enough
 	}
 }
 
@@ -208,7 +208,7 @@ func Open(ctx context.Context, dial transport.Dialer, opts Options) (*Client, er
 	if err != nil {
 		return nil, err
 	}
-	if err := c.handshake(ctx, l, opts.HandshakeTimeout); err != nil {
+	if err := c.handshake(ctx, l, opts.HandshakeTimeout, true); err != nil {
 		c.Close()
 		return nil, err
 	}
@@ -225,7 +225,7 @@ func Open(ctx context.Context, dial transport.Dialer, opts Options) (*Client, er
 // attach starts the reader and heartbeat on conn and makes it the current link.
 func (c *Client) attach(conn transport.Conn) (*link, error) {
 	ctx, cancel := context.WithCancel(context.Background())
-	l := &link{conn: conn, readerEnd: make(chan struct{}), rebooted: make(chan struct{}), cancel: cancel}
+	l := &link{conn: conn, readerEnd: make(chan struct{}), rebooted: make(chan struct{}, 1), cancel: cancel}
 	l.wg.Add(2)
 	go c.readLoop(ctx, l)
 	go c.heartbeatLoop(ctx, l)
@@ -261,8 +261,21 @@ func randomID(skip ...uint32) uint32 {
 // only, 69421 for the node DB only.
 func newNonce() uint32 { return randomID(69420, 69421) }
 
-// handshake runs want_config on l with a fresh nonce and waits for completion.
-func (c *Client) handshake(ctx context.Context, l *link, timeout time.Duration) error {
+// handshake runs want_config on l with a fresh nonce and waits for
+// completion. If the node reports a reboot meanwhile, the request was lost:
+// with resendOnReboot it is sent again with a fresh nonce and a fresh
+// timeout, otherwise handshake returns errRebooted.
+func (c *Client) handshake(ctx context.Context, l *link, timeout time.Duration, resendOnReboot bool) error {
+	for {
+		err := c.handshakeOnce(ctx, l, timeout)
+		if !errors.Is(err, errRebooted) || !resendOnReboot {
+			return err
+		}
+		fmt.Fprintln(c.opts.Log, "node rebooted during handshake; asking again")
+	}
+}
+
+func (c *Client) handshakeOnce(ctx context.Context, l *link, timeout time.Duration) error {
 	nonce, complete := l.startHandshake()
 	req := &pb.ToRadio{PayloadVariant: &pb.ToRadio_WantConfigId{WantConfigId: nonce}}
 	if err := l.send(ctx, req); err != nil {
@@ -274,13 +287,15 @@ func (c *Client) handshake(ctx context.Context, l *link, timeout time.Duration) 
 	select {
 	case <-complete:
 		return nil
+	case <-l.rebooted:
+		return errRebooted
 	case <-l.readerEnd:
 		return fmt.Errorf("handshake: %w", l.readErr)
 	case <-timer.C:
-		return fmt.Errorf("no response to handshake after %s on %s — %s", timeout, l.conn.Kind(), hint)
+		return fmt.Errorf("%w after %s on %s — %s", errHandshakeTimeout, timeout, l.conn.Kind(), hint)
 	case <-ctx.Done():
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return fmt.Errorf("no response to handshake on %s (%w) — %s", l.conn.Kind(), ctx.Err(), hint)
+			return fmt.Errorf("%w on %s (%w) — %s", errHandshakeTimeout, l.conn.Kind(), ctx.Err(), hint)
 		}
 		return ctx.Err()
 	}
@@ -308,6 +323,9 @@ func (c *Client) reconnect(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return fmt.Errorf("waiting for the node after reboot: %w", ctx.Err())
 			}
+			if errors.Is(err, errHandshakeTimeout) {
+				err = errHandshakeTimeout // the "another program" hint does not apply mid-reboot
+			}
 			return fmt.Errorf("node did not come back after reboot within %s: %v", c.opts.ReconnectTimeout, err)
 		case <-t.C:
 		}
@@ -324,7 +342,7 @@ func (c *Client) redial(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := c.handshake(ctx, l, c.opts.HandshakeTimeout); err != nil {
+	if err := c.handshake(ctx, l, c.opts.HandshakeTimeout, true); err != nil {
 		l.close()
 		return err
 	}

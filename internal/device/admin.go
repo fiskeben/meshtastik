@@ -14,10 +14,6 @@ import (
 	"meshtastik/internal/configpath"
 )
 
-// rebootGrace is how long Apply waits after a commit for the node to reboot
-// before re-reading its config over the same connection.
-var rebootGrace = 3 * time.Second
-
 // Change is one write to the node; exactly one field is set. Config and
 // ModuleConfig carry a whole section, which replaces the node's section.
 type Change struct {
@@ -156,6 +152,12 @@ func (ch Change) admin() *pb.AdminMessage {
 // the config back. Changes equal to the current state are skipped, except a
 // fixed position, whose coordinates are not part of the read-back. applied
 // counts the changes written; it is 0 whenever err is non-nil.
+//
+// ErrPartialEdit boundary: from the moment begin_edit_settings is handed to
+// the connection (including when that send fails, as the frame may have
+// reached the node) until commit_edit_settings has been sent, every failure
+// wraps ErrPartialEdit. Failures before that (validation, fetching the
+// session passkey) and after it (reconnecting, verifying) do not.
 func (c *Client) Apply(ctx context.Context, changes []Change) (applied int, err error) {
 	c.applyMu.Lock()
 	defer c.applyMu.Unlock()
@@ -176,10 +178,10 @@ func (c *Client) Apply(ctx context.Context, changes []Change) (applied int, err 
 		return 0, err
 	}
 	begin := &pb.AdminMessage{PayloadVariant: &pb.AdminMessage_BeginEditSettings{BeginEditSettings: true}}
-	if err := c.post(ctx, begin); err != nil {
-		return 0, fmt.Errorf("begin edit: %w", err)
-	}
 	partial := func(cause error) (int, error) { return 0, fmt.Errorf("%w: %v", ErrPartialEdit, cause) }
+	if err := c.post(ctx, begin); err != nil {
+		return partial(fmt.Errorf("begin edit: %w", err))
+	}
 	for _, ch := range todo {
 		if err := ctx.Err(); err != nil {
 			return partial(err)
@@ -209,12 +211,14 @@ func (c *Client) Apply(ctx context.Context, changes []Change) (applied int, err 
 	return len(todo), nil
 }
 
-// awaitNode gives the node rebootGrace to reboot after a commit, then
-// refreshes State: over a new connection if it rebooted, otherwise by
-// re-running the handshake on the same one.
+// awaitNode gives the node RebootGrace to reboot after a commit, then
+// refreshes State by re-running the handshake on the same connection. If the
+// node rebooted, or that re-read fails for any reason (a reboot mid-handshake,
+// a dead or silent link), the commit has already landed, so State is
+// refreshed over a new connection instead.
 func (c *Client) awaitNode(ctx context.Context) error {
 	l := c.current()
-	t := time.NewTimer(rebootGrace)
+	t := time.NewTimer(c.opts.RebootGrace)
 	defer t.Stop()
 	select {
 	case <-l.rebooted:
@@ -225,13 +229,15 @@ func (c *Client) awaitNode(ctx context.Context) error {
 		return fmt.Errorf("after commit: %w", ctx.Err())
 	case <-t.C:
 	}
-	if err := c.handshake(ctx, l, c.opts.HandshakeTimeout); err != nil {
-		if l.gone() {
-			return c.reconnect(ctx)
-		}
-		return fmt.Errorf("re-read config after commit: %w", err)
+	err := c.handshake(ctx, l, c.opts.HandshakeTimeout, false)
+	if err == nil {
+		return nil
 	}
-	return nil
+	if ctx.Err() != nil {
+		return fmt.Errorf("after commit: %w", ctx.Err())
+	}
+	fmt.Fprintf(c.opts.Log, "re-read after commit failed (%v); reconnecting\n", err)
+	return c.reconnect(ctx)
 }
 
 func (c *Client) sessionPasskey() []byte {

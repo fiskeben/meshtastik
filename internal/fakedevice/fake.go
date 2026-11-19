@@ -30,18 +30,31 @@ type Device struct {
 	Silent          bool // never answer want_config
 	StaleCompleteID bool // send one config_complete_id with a wrong nonce first
 
-	RequirePasskey         bool                        // ignore non-get admin messages without the session passkey
-	IgnoreFields           []string                    // config paths whose new value is silently dropped when applied
-	RebootOnCommit         bool                        // after commit: apply, send rebooted, close the link
-	RefuseDialsAfterReboot bool                        // fail every Dial after a RebootOnCommit reboot
-	DropAfter              func(*pb.AdminMessage) bool // close the link after handling a matching admin message
-	OnAdmin                func(*pb.AdminMessage)      // called with each admin message before it is handled
+	RequirePasskey bool     // ignore non-get admin messages without the session passkey
+	IgnoreFields   []string // config paths whose new value is silently dropped when applied
+	RebootOnCommit bool     // after commit: apply, send rebooted, close the link
+	// HandshakeReboots: after a commit, answer this many want_config
+	// requests (on any link) with rebooted instead, keeping the link open.
+	HandshakeReboots int
+	// HangOnCommit: after commit, the link stays open but never answers again.
+	HangOnCommit bool
+	// RefuseDialsAfterReboot fails every Dial after a commit that rebooted
+	// the node (RebootOnCommit, HandshakeReboots or HangOnCommit).
+	RefuseDialsAfterReboot bool
+	// DropAfter closes the link on receiving a matching admin message,
+	// without handling it.
+	DropAfter func(*pb.AdminMessage) bool
+	// OnAdmin is called with each admin message before it is handled, on the
+	// device goroutine. It must not wait on client sends: the device reads
+	// nothing more until it returns.
+	OnAdmin func(*pb.AdminMessage)
 
-	mu         sync.Mutex
-	dials      int
-	heartbeats int
-	received   []*pb.AdminMessage
-	rebooted   bool
+	mu               sync.Mutex
+	dials            int
+	heartbeats       int
+	received         []*pb.AdminMessage
+	rebooted         bool
+	handshakeReboots int // pending HandshakeReboots
 }
 
 // New returns a Device with the default identity and configuration.
@@ -214,7 +227,7 @@ func (l *link) next() (e envelope, ok bool) {
 
 func (d *Device) serve(l *link) {
 	defer l.close()
-	var tx editTx
+	var st linkState
 	for {
 		e, ok := l.next()
 		if !ok {
@@ -222,19 +235,32 @@ func (d *Device) serve(l *link) {
 		}
 		adm := d.record(e.m)
 		close(e.seen)
+		if st.hung {
+			continue
+		}
 		switch v := e.m.PayloadVariant.(type) {
 		case *pb.ToRadio_WantConfigId:
 			d.mu.Lock()
 			silent := d.Silent
+			reboot := !silent && d.handshakeReboots > 0
+			if reboot {
+				d.handshakeReboots--
+			}
 			d.mu.Unlock()
 			if silent {
+				continue
+			}
+			if reboot {
+				if !l.emit(&pb.FromRadio{PayloadVariant: &pb.FromRadio_Rebooted{Rebooted: true}}) {
+					return
+				}
 				continue
 			}
 			if !d.handshake(l, v.WantConfigId) {
 				return
 			}
 		case *pb.ToRadio_Packet:
-			if adm != nil && !d.handleAdmin(l, &tx, v.Packet, adm) {
+			if adm != nil && !d.handleAdmin(l, &st, v.Packet, adm) {
 				return
 			}
 		}
