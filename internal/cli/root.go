@@ -15,7 +15,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"google.golang.org/protobuf/encoding/protojson"
-	"google.golang.org/protobuf/proto"
 	"sigs.k8s.io/yaml"
 
 	"meshtastik/internal/device"
@@ -157,15 +156,6 @@ func (a *app) connect(cmd *cobra.Command) (*device.Client, error) {
 // protoOutput renders messages for display: proto field names, and zero
 // values shown rather than omitted (region UNSET, enabled false).
 var protoOutput = protojson.MarshalOptions{UseProtoNames: true, EmitUnpopulated: true}
-
-// printProto writes m as YAML, or as indented JSON when asJSON is set.
-func printProto(w io.Writer, m proto.Message, asJSON bool) error {
-	raw, err := protoOutput.Marshal(m)
-	if err != nil {
-		return err
-	}
-	return printRaw(w, raw, asJSON)
-}
 
 // printRaw writes the JSON raw as YAML, or as indented JSON when asJSON is set.
 func printRaw(w io.Writer, raw []byte, asJSON bool) error {
