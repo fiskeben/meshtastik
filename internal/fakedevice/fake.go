@@ -29,6 +29,7 @@ type Device struct {
 	ExtraNodes      []*pb.NodeInfo
 	Silent          bool // never answer want_config
 	StaleCompleteID bool // send one config_complete_id with a wrong nonce first
+	AckTexts        bool // answer a direct text message with a ROUTING_APP ack
 
 	RequirePasskey bool     // ignore non-get admin messages without the session passkey
 	IgnoreFields   []string // config paths whose new value is silently dropped when applied
@@ -53,6 +54,7 @@ type Device struct {
 	dials            int
 	heartbeats       int
 	received         []*pb.AdminMessage
+	texts            []*pb.MeshPacket
 	rebooted         bool
 	handshakeReboots int // pending HandshakeReboots
 }
@@ -263,6 +265,9 @@ func (d *Device) serve(l *link) {
 			if adm != nil && !d.handleAdmin(l, &st, v.Packet, adm) {
 				return
 			}
+			if v.Packet.GetDecoded().GetPortnum() == pb.PortNum_TEXT_MESSAGE_APP && !d.ackText(l, v.Packet) {
+				return
+			}
 		}
 	}
 }
@@ -277,6 +282,10 @@ func (d *Device) record(m *pb.ToRadio) *pb.AdminMessage {
 		return nil
 	}
 	data := m.GetPacket().GetDecoded()
+	if data.GetPortnum() == pb.PortNum_TEXT_MESSAGE_APP {
+		d.texts = append(d.texts, proto.Clone(m.GetPacket()).(*pb.MeshPacket))
+		return nil
+	}
 	if data.GetPortnum() != pb.PortNum_ADMIN_APP {
 		return nil
 	}
@@ -324,4 +333,34 @@ func (d *Device) handshake(l *link, nonce uint32) bool {
 		}
 	}
 	return true
+}
+
+// Texts returns copies of every text message packet the device has received.
+func (d *Device) Texts() []*pb.MeshPacket {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]*pb.MeshPacket, len(d.texts))
+	for i, p := range d.texts {
+		out[i] = proto.Clone(p).(*pb.MeshPacket)
+	}
+	return out
+}
+
+// ackText answers a direct text packet with a ROUTING_APP ack when AckTexts
+// is set; false when the link is gone.
+func (d *Device) ackText(l *link, p *pb.MeshPacket) bool {
+	d.mu.Lock()
+	ack, num := d.AckTexts, d.NodeNum
+	d.mu.Unlock()
+	if !ack || p.GetTo() == 0xffffffff {
+		return true
+	}
+	payload, err := proto.Marshal(&pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: pb.Routing_NONE}})
+	if err != nil {
+		panic(err)
+	}
+	pkt := &pb.MeshPacket{From: p.GetTo(), To: num, PayloadVariant: &pb.MeshPacket_Decoded{Decoded: &pb.Data{
+		Portnum: pb.PortNum_ROUTING_APP, Payload: payload, RequestId: p.GetId(),
+	}}}
+	return l.emit(&pb.FromRadio{PayloadVariant: &pb.FromRadio_Packet{Packet: pkt}})
 }
