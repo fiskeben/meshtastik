@@ -50,6 +50,11 @@ type Device struct {
 	// RefuseDialsAfterReboot fails every Dial after a commit that rebooted
 	// the node (RebootOnCommit, HandshakeReboots or HangOnCommit).
 	RefuseDialsAfterReboot bool
+	// RefuseDials fails every Dial while set.
+	RefuseDials bool
+	// Backlog is emitted right after config_complete_id on the first
+	// handshake of the first dial, as a node hands over queued packets.
+	Backlog []*pb.MeshPacket
 	// DropAfter closes the link on receiving a matching admin message,
 	// without handling it.
 	DropAfter func(*pb.AdminMessage) bool
@@ -64,7 +69,9 @@ type Device struct {
 	received         []*pb.AdminMessage
 	texts            []*pb.MeshPacket
 	rebooted         bool
-	handshakeReboots int // pending HandshakeReboots
+	handshakeReboots int   // pending HandshakeReboots
+	cur              *link // link of the latest successful Dial
+	backlogSent      bool
 }
 
 // New returns a Device with the default identity and configuration.
@@ -129,13 +136,18 @@ func (d *Device) Dialer() transport.Dialer {
 		}
 		d.mu.Lock()
 		d.dials++
-		refuse := d.rebooted && d.RefuseDialsAfterReboot
+		refuse := d.RefuseDials || d.rebooted && d.RefuseDialsAfterReboot
 		kind := d.Kind
+		var l *link
+		if !refuse {
+			l = newLink()
+			l.first = d.dials == 1
+			d.cur = l
+		}
 		d.mu.Unlock()
 		if refuse {
 			return nil, errors.New("fakedevice: dial refused")
 		}
-		l := newLink()
 		go d.serve(l)
 		return &clientConn{l: l, kind: kind}, nil
 	}
@@ -154,6 +166,7 @@ type link struct {
 	toClient chan *pb.FromRadio
 	done     chan struct{}
 	once     sync.Once
+	first    bool // made by the first Dial
 }
 
 func newLink() *link {
@@ -330,6 +343,12 @@ func (d *Device) handshake(l *link, nonce uint32) bool {
 		msgs = append(msgs, &pb.FromRadio{PayloadVariant: &pb.FromRadio_Channel{Channel: ch}})
 	}
 	msgs = append(msgs, &pb.FromRadio{PayloadVariant: &pb.FromRadio_ConfigCompleteId{ConfigCompleteId: nonce}})
+	if l.first && !d.backlogSent {
+		d.backlogSent = true
+		for _, p := range d.Backlog {
+			msgs = append(msgs, &pb.FromRadio{PayloadVariant: &pb.FromRadio_Packet{Packet: p}})
+		}
+	}
 	// Clone under the lock so tests can mutate the fields afterwards.
 	for i, m := range msgs {
 		msgs[i] = proto.Clone(m).(*pb.FromRadio)
@@ -341,6 +360,29 @@ func (d *Device) handshake(l *link, nonce uint32) bool {
 		}
 	}
 	return true
+}
+
+// Inject emits p as a received packet on the current link; a no-op when
+// there is no open link.
+func (d *Device) Inject(p *pb.MeshPacket) {
+	d.mu.Lock()
+	l := d.cur
+	m := &pb.FromRadio{PayloadVariant: &pb.FromRadio_Packet{Packet: proto.Clone(p).(*pb.MeshPacket)}}
+	d.mu.Unlock()
+	if l != nil {
+		l.emit(m)
+	}
+}
+
+// DropLink closes the current link from the device side, as when the node
+// kicks the client or the cable is pulled.
+func (d *Device) DropLink() {
+	d.mu.Lock()
+	l := d.cur
+	d.mu.Unlock()
+	if l != nil {
+		l.close()
+	}
 }
 
 // Texts returns copies of every text message packet the device has received.

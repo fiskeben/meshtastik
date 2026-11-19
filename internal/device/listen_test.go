@@ -1,0 +1,118 @@
+package device_test
+
+import (
+	"context"
+	"fmt"
+	"math/rand/v2"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
+
+	"meshtastik/internal/device"
+	"meshtastik/internal/fakedevice"
+)
+
+func text(from uint32, to uint32, s string) *pb.MeshPacket {
+	return &pb.MeshPacket{From: from, To: to, Id: rand.Uint32() | 1,
+		PayloadVariant: &pb.MeshPacket_Decoded{Decoded: &pb.Data{Portnum: pb.PortNum_TEXT_MESSAGE_APP, Payload: []byte(s)}}}
+}
+
+func TestListenDeliversBacklogThenLive(t *testing.T) {
+	d := fakedevice.New()
+	d.Backlog = []*pb.MeshPacket{text(42, device.Broadcast, "old")}
+	c, _ := open(t, d, device.Options{})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var got []string
+	go func() { time.Sleep(50 * time.Millisecond); d.Inject(text(42, device.Broadcast, "new")) }()
+	err := c.Listen(ctx, func(p *pb.MeshPacket) error {
+		got = append(got, string(p.GetDecoded().GetPayload()))
+		if len(got) == 2 {
+			cancel()
+		}
+		return nil
+	})
+	if err != nil || !slices.Equal(got, []string{"old", "new"}) {
+		t.Fatal(got, err)
+	}
+}
+
+func TestListenBufferBounded(t *testing.T) {
+	d := fakedevice.New()
+	for i := range 300 {
+		d.Backlog = append(d.Backlog, text(42, device.Broadcast, fmt.Sprint(i)))
+	}
+	c, _ := open(t, d, device.Options{})
+	time.Sleep(100 * time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var first string
+	n := 0
+	c.Listen(ctx, func(p *pb.MeshPacket) error {
+		if n == 0 {
+			first = string(p.GetDecoded().GetPayload())
+		}
+		n++
+		if n == 256 {
+			cancel()
+		}
+		return nil
+	})
+	if first != "44" || c.DroppedPackets() != 44 {
+		t.Fatal(first, c.DroppedPackets())
+	}
+}
+
+func TestListenReturnsCallbackError(t *testing.T) {
+	d := fakedevice.New()
+	d.Backlog = []*pb.MeshPacket{text(42, device.Broadcast, "old")}
+	c, _ := open(t, d, device.Options{})
+	want := fmt.Errorf("stop")
+	if err := c.Listen(ctxT(t), func(*pb.MeshPacket) error { return want }); err != want {
+		t.Fatal(err)
+	}
+}
+
+func TestListenReconnectsAfterDrop(t *testing.T) {
+	d := fakedevice.New()
+	d.Backlog = []*pb.MeshPacket{text(42, device.Broadcast, "old")} // first dial only
+	c, _ := open(t, d, device.Options{})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		d.DropLink()
+		for d.Dials() < 2 {
+			time.Sleep(10 * time.Millisecond)
+		}
+		time.Sleep(100 * time.Millisecond)
+		d.Inject(text(42, device.Broadcast, "after"))
+	}()
+	var got []string
+	err := c.Listen(ctx, func(p *pb.MeshPacket) error {
+		got = append(got, string(p.GetDecoded().GetPayload()))
+		if got[len(got)-1] == "after" {
+			cancel()
+		}
+		return nil
+	})
+	if err != nil || !slices.Equal(got, []string{"old", "after"}) {
+		t.Fatal(got, err)
+	}
+}
+
+func TestListenGivesUpWhenNodeGone(t *testing.T) {
+	d := fakedevice.New()
+	c, _ := open(t, d, device.Options{ReconnectTimeout: 300 * time.Millisecond})
+	d.RefuseDials = true
+	go func() { time.Sleep(50 * time.Millisecond); d.DropLink() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	err := c.Listen(ctx, func(*pb.MeshPacket) error { return nil })
+	if err == nil || !strings.Contains(err.Error(), "did not come back") || ctx.Err() != nil {
+		t.Fatal(err)
+	}
+}

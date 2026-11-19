@@ -55,6 +55,7 @@ Other global flags: `--json`, `--yes` (skip confirmations), `--debug`, `--timeou
 | `shutdown` | Ask the node to power off (it shuts down in ~5 seconds) |
 | `factory-reset [--full]` | Erase the node's configuration (`--full` also erases device state) |
 | `send <text> [--to node] [--channel n] [--ack-timeout d]` | Send a text message; `--to` takes a `!hex` id, number or name (default: broadcast) |
+| `listen [--channel n] [--json] [--all] [--count n]` | Print received messages: the node's queued backlog, then new ones until Ctrl-C; `--all` adds other packet types, `--count` exits after n messages |
 | `ble scan [--duration d]` | Scan for nearby Meshtastic devices over BLE |
 | `version` | Print the version |
 
@@ -69,6 +70,7 @@ Run `meshtastik <command> --help` for details.
 - `config import` restores `location` only when the backup's merged config has `position.fixed_position: true`; Python backups of GPS nodes carry a location that is otherwise ignored (with a note).
 - A node with `security.is_managed` set ignores local configuration, so meshtastik refuses changes to it, except turning `security.is_managed` off.
 - Changes that could cut the link in use (Bluetooth off or WiFi on over BLE, WiFi/network changes over TCP, the serial console off or taken over by the serial module over serial) ask for confirmation first.
+- `listen` has no history: it shows the few messages the node queued while no client was connected, then live traffic. The node hands each message to one connected client only, so if Home Assistant or the phone app is connected at the same time they split the traffic.
 - Ctrl-C during a change: before the commit, meshtastik reports that the node may hold a partial edit (reboot the node to discard it); after the commit, it reports that the changes were committed but could not be verified. A second Ctrl-C exits at once.
 
 ## Bluetooth

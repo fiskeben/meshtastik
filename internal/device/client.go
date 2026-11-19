@@ -187,7 +187,9 @@ type Client struct {
 	wmu     sync.Mutex
 	waiters map[uint32]chan *pb.MeshPacket // by request id
 
-	applyMu   sync.Mutex // serialises Apply
+	packets packetQueue // every MeshPacket received, across reconnects
+
+	applyMu   sync.Mutex // serialises Apply and Listen's reconnects
 	closeOnce sync.Once
 }
 
@@ -203,6 +205,7 @@ func Open(ctx context.Context, dial transport.Dialer, opts Options) (*Client, er
 		opts:    opts,
 		state:   newState(),
 		waiters: map[uint32]chan *pb.MeshPacket{},
+		packets: packetQueue{wake: make(chan struct{}, 1)},
 	}
 	l, err := c.attach(conn)
 	if err != nil {
@@ -301,9 +304,10 @@ func (c *Client) handshakeOnce(ctx context.Context, l *link, timeout time.Durati
 	}
 }
 
-// reconnect replaces the current link after a reboot: it redials with
-// backoff and re-runs the handshake until ReconnectTimeout.
-func (c *Client) reconnect(ctx context.Context) error {
+// reconnect replaces the current link after a reboot or a dropped link
+// (after says which, for messages): it redials with backoff and re-runs the
+// handshake until ReconnectTimeout.
+func (c *Client) reconnect(ctx context.Context, after string) error {
 	if l := c.current(); l != nil {
 		l.close()
 	}
@@ -321,12 +325,12 @@ func (c *Client) reconnect(ctx context.Context) error {
 		case <-rctx.Done():
 			t.Stop()
 			if ctx.Err() != nil {
-				return fmt.Errorf("waiting for the node after reboot: %w", ctx.Err())
+				return fmt.Errorf("waiting for the node %s: %w", after, ctx.Err())
 			}
 			if errors.Is(err, errHandshakeTimeout) {
 				err = errHandshakeTimeout // the "another program" hint does not apply mid-reboot
 			}
-			return fmt.Errorf("node did not come back after reboot within %s: %v", c.opts.ReconnectTimeout, err)
+			return fmt.Errorf("node did not come back %s within %s: %v", after, c.opts.ReconnectTimeout, err)
 		case <-t.C:
 		}
 		delay = min(delay*2, maxReconnectBackoff)
@@ -395,18 +399,21 @@ func (c *Client) dispatch(l *link, m *pb.FromRadio) {
 		}
 	case *pb.FromRadio_Packet:
 		p := v.Packet
+		if p == nil {
+			return
+		}
 		if id := p.GetDecoded().GetRequestId(); id != 0 {
 			c.deliver(id, p)
 		}
-		if p.GetRxTime() == 0 { // not received over the radio
-			return
+		if p.GetRxTime() != 0 { // received over the radio
+			c.update(func(s *State) {
+				if n, ok := s.Nodes[p.GetFrom()]; ok {
+					n.LastHeard = p.GetRxTime()
+					n.Snr = p.GetRxSnr()
+				}
+			})
 		}
-		c.update(func(s *State) {
-			if n, ok := s.Nodes[p.GetFrom()]; ok {
-				n.LastHeard = p.GetRxTime()
-				n.Snr = p.GetRxSnr()
-			}
-		})
+		c.packets.push(p)
 	default:
 		fmt.Fprintf(c.opts.Log, "ignoring %T\n", m.PayloadVariant)
 	}
