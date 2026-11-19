@@ -31,7 +31,7 @@ Pick one transport with a global flag. With none, meshtastik looks for a serial 
 - `--host <host[:port]>` TCP (default port 4403)
 - `--ble <name or address>` Bluetooth LE
 
-Other global flags: `--json`, `--yes` (skip confirmations), `--debug`, `--timeout <duration>` (0 = per-transport default).
+Other global flags: `--json`, `--yes` (skip confirmations), `--debug`, `--timeout <duration>` (bounds the handshake and each request, not the whole operation; 0 = per-transport default).
 
 ## Commands
 
@@ -47,10 +47,10 @@ Other global flags: `--json`, `--yes` (skip confirmations), `--debug`, `--timeou
 | `channel add <name> [--psk ...]` | Add a secondary channel in the first free slot |
 | `channel set <index> <field> <value>` | Set a channel settings field |
 | `channel del <index>` | Delete a secondary channel; later channels shift down |
-| `channel url [--no-qr] [--set URL]` | Show the channel URL and QR code, or replace all channels from a URL |
+| `channel url [--no-qr] [--set URL]` | Show the channel URL and QR code, or replace all channels from a URL (add-style `?add=true` URLs are refused; use `channel add`) |
 | `owner set <long-name> [--short X]` | Set the owner's long name, and optionally the short name |
-| `reboot` | Reboot the node in 5 seconds |
-| `shutdown` | Power the node off in 5 seconds |
+| `reboot` | Ask the node to reboot (it restarts in ~5 seconds) |
+| `shutdown` | Ask the node to power off (it shuts down in ~5 seconds) |
 | `factory-reset [--full]` | Erase the node's configuration (`--full` also erases device state) |
 | `send <text> [--to node] [--channel n] [--ack-timeout d]` | Send a text message; `--to` takes a `!hex` id, number or name (default: broadcast) |
 | `ble scan [--duration d]` | Scan for nearby Meshtastic devices over BLE |
@@ -61,8 +61,13 @@ Run `meshtastik <command> --help` for details.
 ### Notes
 
 - Negative values need `--` so they are not read as flags: `meshtastik config set -- lora.tx_power -5`.
+- `config get` shows zero values (e.g. `enabled: false`) and prints `security.private_key` as `<redacted; use config export>`. Ask for the field itself (`config get security.private_key`) to see it.
 - `config export` writes the node's private key. The file is created with mode 0600; keep it safe.
-- `config import` leaves the node's own private and public keys alone unless you pass `--keys`.
+- `config import` leaves the node's own private and public keys alone unless you pass `--keys`. Even with `--keys`, neither key is applied if either is empty or not 32 bytes in the file, because the node would then generate a new identity.
+- `config import` restores `location` only when the backup's merged config has `position.fixed_position: true`; Python backups of GPS nodes carry a location that is otherwise ignored (with a note).
+- A node with `security.is_managed` set ignores local configuration, so meshtastik refuses changes to it, except turning `security.is_managed` off.
+- Changes that could cut the link in use (Bluetooth off or WiFi on over BLE, WiFi/network changes over TCP, the serial console off or taken over by the serial module over serial) ask for confirmation first.
+- Ctrl-C during a change: before the commit, meshtastik reports that the node may hold a partial edit (reboot the node to discard it); after the commit, it reports that the changes were committed but could not be verified. A second Ctrl-C exits at once.
 
 ## Bluetooth
 
