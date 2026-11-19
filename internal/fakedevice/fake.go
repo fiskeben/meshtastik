@@ -4,6 +4,7 @@ package fakedevice
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -15,8 +16,8 @@ import (
 	"meshtastik/internal/transport"
 )
 
-// Device is a fake node. Set fields before the first Dial; the fields are read
-// when a handshake is answered.
+// Device is a fake node. Set fields before the first Dial; they are read under
+// the device lock when a handshake or admin message is answered.
 type Device struct {
 	NodeNum         uint32
 	FirmwareVersion string
@@ -29,9 +30,18 @@ type Device struct {
 	Silent          bool // never answer want_config
 	StaleCompleteID bool // send one config_complete_id with a wrong nonce first
 
+	RequirePasskey         bool                        // ignore non-get admin messages without the session passkey
+	IgnoreFields           []string                    // config paths whose new value is silently dropped when applied
+	RebootOnCommit         bool                        // after commit: apply, send rebooted, close the link
+	RefuseDialsAfterReboot bool                        // fail every Dial after a RebootOnCommit reboot
+	DropAfter              func(*pb.AdminMessage) bool // close the link after handling a matching admin message
+	OnAdmin                func(*pb.AdminMessage)      // called with each admin message before it is handled
+
 	mu         sync.Mutex
 	dials      int
 	heartbeats int
+	received   []*pb.AdminMessage
+	rebooted   bool
 }
 
 // New returns a Device with the default identity and configuration.
@@ -96,23 +106,35 @@ func (d *Device) Dialer() transport.Dialer {
 		}
 		d.mu.Lock()
 		d.dials++
+		refuse := d.rebooted && d.RefuseDialsAfterReboot
+		kind := d.Kind
 		d.mu.Unlock()
+		if refuse {
+			return nil, errors.New("fakedevice: dial refused")
+		}
 		l := newLink()
 		go d.serve(l)
-		return &clientConn{l: l, kind: d.Kind}, nil
+		return &clientConn{l: l, kind: kind}, nil
 	}
+}
+
+// envelope carries a ToRadio to the device; seen closes once the device has
+// recorded it, so Send returning means Received/Heartbeats include it.
+type envelope struct {
+	m    *pb.ToRadio
+	seen chan struct{}
 }
 
 // link is the shared state of one in-memory connection.
 type link struct {
-	toDevice chan *pb.ToRadio
+	toDevice chan envelope
 	toClient chan *pb.FromRadio
 	done     chan struct{}
 	once     sync.Once
 }
 
 func newLink() *link {
-	return &link{toDevice: make(chan *pb.ToRadio), toClient: make(chan *pb.FromRadio), done: make(chan struct{})}
+	return &link{toDevice: make(chan envelope), toClient: make(chan *pb.FromRadio), done: make(chan struct{})}
 }
 
 // clientConn is the client-facing end of a link.
@@ -129,17 +151,28 @@ func (c *clientConn) Send(ctx context.Context, m *pb.ToRadio) error {
 		return ctx.Err()
 	default:
 	}
+	e := envelope{m: proto.Clone(m).(*pb.ToRadio), seen: make(chan struct{})}
 	select {
-	case c.l.toDevice <- proto.Clone(m).(*pb.ToRadio):
-		return nil
+	case c.l.toDevice <- e:
 	case <-c.l.done:
 		return fmt.Errorf("fakedevice send: %w", transport.ErrClosed)
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+	// Delivered; the device records it without blocking.
+	select {
+	case <-e.seen:
+	case <-c.l.done:
+	}
+	return nil
 }
 
 func (c *clientConn) Recv(ctx context.Context) (*pb.FromRadio, error) {
+	select {
+	case <-c.l.done:
+		return nil, fmt.Errorf("fakedevice recv: %w", transport.ErrClosed)
+	default:
+	}
 	select {
 	case m := <-c.l.toClient:
 		return m, nil
@@ -169,37 +202,64 @@ func (l *link) emit(m *pb.FromRadio) bool {
 	}
 }
 
-// next reads a ToRadio on the device side; nil when the link is gone.
-func (l *link) next() *pb.ToRadio {
+// next reads a ToRadio on the device side; ok is false when the link is gone.
+func (l *link) next() (e envelope, ok bool) {
 	select {
-	case m := <-l.toDevice:
-		return m
+	case e := <-l.toDevice:
+		return e, true
 	case <-l.done:
-		return nil
+		return envelope{}, false
 	}
 }
 
 func (d *Device) serve(l *link) {
 	defer l.close()
+	var tx editTx
 	for {
-		m := l.next()
-		if m == nil {
+		e, ok := l.next()
+		if !ok {
 			return
 		}
-		switch v := m.PayloadVariant.(type) {
+		adm := d.record(e.m)
+		close(e.seen)
+		switch v := e.m.PayloadVariant.(type) {
 		case *pb.ToRadio_WantConfigId:
-			if d.Silent {
+			d.mu.Lock()
+			silent := d.Silent
+			d.mu.Unlock()
+			if silent {
 				continue
 			}
 			if !d.handshake(l, v.WantConfigId) {
 				return
 			}
-		case *pb.ToRadio_Heartbeat:
-			d.mu.Lock()
-			d.heartbeats++
-			d.mu.Unlock()
+		case *pb.ToRadio_Packet:
+			if adm != nil && !d.handleAdmin(l, &tx, v.Packet, adm) {
+				return
+			}
 		}
 	}
+}
+
+// record counts heartbeats and stores admin messages; it returns the decoded
+// admin message, or nil if m is not one.
+func (d *Device) record(m *pb.ToRadio) *pb.AdminMessage {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if m.GetHeartbeat() != nil {
+		d.heartbeats++
+		return nil
+	}
+	data := m.GetPacket().GetDecoded()
+	if data.GetPortnum() != pb.PortNum_ADMIN_APP {
+		return nil
+	}
+	adm := &pb.AdminMessage{}
+	if err := proto.Unmarshal(data.GetPayload(), adm); err != nil {
+		return nil
+	}
+	d.received = append(d.received, proto.Clone(adm).(*pb.AdminMessage))
+	return adm
 }
 
 // handshake answers want_config_id in firmware order.

@@ -6,8 +6,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 	"time"
 
@@ -65,7 +67,7 @@ func (s *State) clone() *State {
 
 // Options tunes a Client; zero values select the defaults.
 type Options struct {
-	HandshakeTimeout  time.Duration // default 15s
+	HandshakeTimeout  time.Duration // default 15s; also bounds each admin request
 	ReconnectTimeout  time.Duration // default 90s
 	HeartbeatInterval time.Duration // default 5m
 	Log               io.Writer     // default io.Discard
@@ -86,24 +88,106 @@ func (o *Options) defaults() {
 	}
 }
 
+// Redial backoff after a reboot: starts here, doubles, capped.
+const (
+	reconnectBackoff    = 500 * time.Millisecond
+	maxReconnectBackoff = 5 * time.Second
+)
+
+var errClientClosed = errors.New("client closed")
+
+// link is one physical connection with its own reader and heartbeat
+// goroutines. A reconnect replaces the whole link.
+type link struct {
+	conn   transport.Conn
+	sendMu sync.Mutex
+
+	readerEnd chan struct{} // closed when the reader goroutine exits
+	readErr   error         // set before readerEnd closes
+
+	rebooted   chan struct{} // closed when the node reports it rebooted
+	rebootOnce sync.Once
+
+	mu       sync.Mutex    // guards nonce and complete
+	nonce    uint32        // of the handshake in progress
+	complete chan struct{} // closed when its config_complete_id arrives
+
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	closeOnce sync.Once
+	closeErr  error
+}
+
+// send serialises writes to the connection.
+func (l *link) send(ctx context.Context, m *pb.ToRadio) error {
+	l.sendMu.Lock()
+	defer l.sendMu.Unlock()
+	return l.conn.Send(ctx, m)
+}
+
+// startHandshake arms a fresh nonce and returns it with its completion signal.
+func (l *link) startHandshake() (uint32, chan struct{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.nonce = newNonce()
+	l.complete = make(chan struct{})
+	return l.nonce, l.complete
+}
+
+func (l *link) configComplete(id uint32) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.complete == nil || id != l.nonce {
+		return
+	}
+	select {
+	case <-l.complete:
+	default:
+		close(l.complete)
+	}
+}
+
+func (l *link) markRebooted() { l.rebootOnce.Do(func() { close(l.rebooted) }) }
+
+// gone reports whether the node rebooted or the connection ended.
+func (l *link) gone() bool {
+	select {
+	case <-l.rebooted:
+		return true
+	case <-l.readerEnd:
+		return true
+	default:
+		return false
+	}
+}
+
+// close stops the goroutines and closes the connection; safe to repeat.
+func (l *link) close() error {
+	l.closeOnce.Do(func() {
+		l.cancel()
+		l.closeErr = l.conn.Close()
+		l.wg.Wait()
+	})
+	return l.closeErr
+}
+
 // Client is a handshaken connection to a local node.
 type Client struct {
 	dial transport.Dialer // kept for reconnecting after a reboot
 	opts Options
 
-	conn   transport.Conn
-	sendMu sync.Mutex
+	connMu sync.Mutex // guards cur and closed
+	cur    *link
+	closed bool
 
-	mu    sync.Mutex // guards state
-	state *State
+	mu      sync.Mutex // guards state and passkey
+	state   *State
+	passkey []byte // admin session passkey, refreshed from admin responses
 
-	nonce     uint32
-	complete  chan struct{} // closed when the handshake's config_complete_id arrives
-	readerEnd chan struct{} // closed when the reader goroutine exits
-	readErr   error         // set before readerEnd closes
+	wmu     sync.Mutex
+	waiters map[uint32]chan *pb.MeshPacket // by request id
 
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
+	applyMu   sync.Mutex // serialises Apply
 	closeOnce sync.Once
 }
 
@@ -115,20 +199,16 @@ func Open(ctx context.Context, dial transport.Dialer, opts Options) (*Client, er
 		return nil, err
 	}
 	c := &Client{
-		dial:      dial,
-		opts:      opts,
-		conn:      conn,
-		state:     newState(),
-		nonce:     newNonce(),
-		complete:  make(chan struct{}),
-		readerEnd: make(chan struct{}),
+		dial:    dial,
+		opts:    opts,
+		state:   newState(),
+		waiters: map[uint32]chan *pb.MeshPacket{},
 	}
-	rctx, cancel := context.WithCancel(context.Background())
-	c.cancel = cancel
-	c.wg.Add(1)
-	go c.readLoop(rctx)
-
-	if err := c.handshake(ctx); err != nil {
+	l, err := c.attach(conn)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.handshake(ctx, l, opts.HandshakeTimeout); err != nil {
 		c.Close()
 		return nil, err
 	}
@@ -139,71 +219,148 @@ func Open(ctx context.Context, dial transport.Dialer, opts Options) (*Client, er
 		}
 		return nil, fmt.Errorf("%w: %s (need 2.5 or newer)", ErrUnsupportedFirmware, v)
 	}
-	c.wg.Add(1)
-	go c.heartbeatLoop(rctx)
 	return c, nil
 }
 
-func newNonce() uint32 {
+// attach starts the reader and heartbeat on conn and makes it the current link.
+func (c *Client) attach(conn transport.Conn) (*link, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	l := &link{conn: conn, readerEnd: make(chan struct{}), rebooted: make(chan struct{}), cancel: cancel}
+	l.wg.Add(2)
+	go c.readLoop(ctx, l)
+	go c.heartbeatLoop(ctx, l)
+	c.connMu.Lock()
+	if c.closed {
+		c.connMu.Unlock()
+		l.close()
+		return nil, errClientClosed
+	}
+	c.cur = l
+	c.connMu.Unlock()
+	return l, nil
+}
+
+func (c *Client) current() *link {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	return c.cur
+}
+
+// randomID returns a random uint32 that is non-zero and not in skip.
+func randomID(skip ...uint32) uint32 {
 	var b [4]byte
 	for {
-		if _, err := rand.Read(b[:]); err == nil {
-			if n := binary.BigEndian.Uint32(b[:]); n != 0 {
-				return n
-			}
+		rand.Read(b[:])
+		if n := binary.BigEndian.Uint32(b[:]); n != 0 && !slices.Contains(skip, n) {
+			return n
 		}
 	}
 }
 
-func (c *Client) handshake(ctx context.Context) error {
-	req := &pb.ToRadio{PayloadVariant: &pb.ToRadio_WantConfigId{WantConfigId: c.nonce}}
-	if err := c.send(ctx, req); err != nil {
+// newNonce avoids the special want_config nonces: 69420 asks for config
+// only, 69421 for the node DB only.
+func newNonce() uint32 { return randomID(69420, 69421) }
+
+// handshake runs want_config on l with a fresh nonce and waits for completion.
+func (c *Client) handshake(ctx context.Context, l *link, timeout time.Duration) error {
+	nonce, complete := l.startHandshake()
+	req := &pb.ToRadio{PayloadVariant: &pb.ToRadio_WantConfigId{WantConfigId: nonce}}
+	if err := l.send(ctx, req); err != nil {
 		return fmt.Errorf("start handshake: %w", err)
 	}
-	timer := time.NewTimer(c.opts.HandshakeTimeout)
+	const hint = "is another program connected to the node?"
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
-	case <-c.complete:
+	case <-complete:
 		return nil
-	case <-c.readerEnd:
-		return fmt.Errorf("handshake: %w", c.readErr)
+	case <-l.readerEnd:
+		return fmt.Errorf("handshake: %w", l.readErr)
 	case <-timer.C:
-		return fmt.Errorf("no response to handshake after %s on %s — is another program connected to the node?", c.opts.HandshakeTimeout, c.conn.Kind())
+		return fmt.Errorf("no response to handshake after %s on %s — %s", timeout, l.conn.Kind(), hint)
 	case <-ctx.Done():
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("no response to handshake on %s (%w) — %s", l.conn.Kind(), ctx.Err(), hint)
+		}
 		return ctx.Err()
 	}
 }
 
-// send serialises writes to the connection.
-func (c *Client) send(ctx context.Context, m *pb.ToRadio) error {
-	c.sendMu.Lock()
-	defer c.sendMu.Unlock()
-	return c.conn.Send(ctx, m)
-}
-
-// readLoop is the only goroutine that reads from the connection.
-func (c *Client) readLoop(ctx context.Context) {
-	defer c.wg.Done()
-	defer close(c.readerEnd)
+// reconnect replaces the current link after a reboot: it redials with
+// backoff and re-runs the handshake until ReconnectTimeout.
+func (c *Client) reconnect(ctx context.Context) error {
+	if l := c.current(); l != nil {
+		l.close()
+	}
+	c.setPasskey(nil) // the node makes a new session key on boot
+	rctx, cancel := context.WithTimeout(ctx, c.opts.ReconnectTimeout)
+	defer cancel()
+	delay := reconnectBackoff
 	for {
-		m, err := c.conn.Recv(ctx)
-		if err != nil {
-			c.readErr = err
-			return
+		err := c.redial(rctx)
+		if err == nil || errors.Is(err, errClientClosed) {
+			return err
 		}
-		c.dispatch(m)
+		t := time.NewTimer(delay)
+		select {
+		case <-rctx.Done():
+			t.Stop()
+			if ctx.Err() != nil {
+				return fmt.Errorf("waiting for the node after reboot: %w", ctx.Err())
+			}
+			return fmt.Errorf("node did not come back after reboot within %s: %v", c.opts.ReconnectTimeout, err)
+		case <-t.C:
+		}
+		delay = min(delay*2, maxReconnectBackoff)
 	}
 }
 
-// dispatch routes one FromRadio message by payload variant.
-func (c *Client) dispatch(m *pb.FromRadio) {
+func (c *Client) redial(ctx context.Context) error {
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return err
+	}
+	l, err := c.attach(conn)
+	if err != nil {
+		return err
+	}
+	if err := c.handshake(ctx, l, c.opts.HandshakeTimeout); err != nil {
+		l.close()
+		return err
+	}
+	return nil
+}
+
+// send writes to the current link.
+func (c *Client) send(ctx context.Context, m *pb.ToRadio) error {
+	return c.current().send(ctx, m)
+}
+
+// readLoop is the only goroutine that reads from l's connection.
+func (c *Client) readLoop(ctx context.Context, l *link) {
+	defer l.wg.Done()
+	defer close(l.readerEnd)
+	for {
+		m, err := l.conn.Recv(ctx)
+		if err != nil {
+			l.readErr = err
+			return
+		}
+		c.dispatch(l, m)
+	}
+}
+
+// dispatch routes one FromRadio message from l by payload variant.
+func (c *Client) dispatch(l *link, m *pb.FromRadio) {
 	switch v := m.PayloadVariant.(type) {
 	case *pb.FromRadio_MyInfo:
 		c.update(func(s *State) { s.MyInfo = v.MyInfo })
 	case *pb.FromRadio_Metadata:
 		c.update(func(s *State) { s.Metadata = v.Metadata })
 	case *pb.FromRadio_NodeInfo:
-		c.update(func(s *State) { s.Nodes[v.NodeInfo.Num] = v.NodeInfo })
+		if n := v.NodeInfo; n != nil {
+			c.update(func(s *State) { s.Nodes[n.GetNum()] = n })
+		}
 	case *pb.FromRadio_Config:
 		c.update(func(s *State) { configpath.MergeConfig(s.Config, v.Config) })
 	case *pb.FromRadio_ModuleConfig:
@@ -213,18 +370,23 @@ func (c *Client) dispatch(m *pb.FromRadio) {
 			c.update(func(s *State) { s.Channels[i] = v.Channel })
 		}
 	case *pb.FromRadio_ConfigCompleteId:
-		if v.ConfigCompleteId == c.nonce {
-			select {
-			case <-c.complete:
-			default:
-				close(c.complete)
-			}
+		l.configComplete(v.ConfigCompleteId)
+	case *pb.FromRadio_Rebooted:
+		if v.Rebooted {
+			l.markRebooted()
 		}
 	case *pb.FromRadio_Packet:
+		p := v.Packet
+		if id := p.GetDecoded().GetRequestId(); id != 0 {
+			c.deliver(id, p)
+		}
+		if p.GetRxTime() == 0 { // not received over the radio
+			return
+		}
 		c.update(func(s *State) {
-			if n, ok := s.Nodes[v.Packet.GetFrom()]; ok {
-				n.LastHeard = v.Packet.GetRxTime()
-				n.Snr = v.Packet.GetRxSnr()
+			if n, ok := s.Nodes[p.GetFrom()]; ok {
+				n.LastHeard = p.GetRxTime()
+				n.Snr = p.GetRxSnr()
 			}
 		})
 	default:
@@ -238,8 +400,38 @@ func (c *Client) update(f func(*State)) {
 	f(c.state)
 }
 
-func (c *Client) heartbeatLoop(ctx context.Context) {
-	defer c.wg.Done()
+// addWaiter registers interest in packets answering request id.
+func (c *Client) addWaiter(id uint32) chan *pb.MeshPacket {
+	ch := make(chan *pb.MeshPacket, 4)
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	c.waiters[id] = ch
+	return ch
+}
+
+func (c *Client) removeWaiter(id uint32) {
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	delete(c.waiters, id)
+}
+
+// deliver hands p to the waiter for request id, if any, without blocking.
+func (c *Client) deliver(id uint32, p *pb.MeshPacket) {
+	c.wmu.Lock()
+	ch := c.waiters[id]
+	c.wmu.Unlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- p:
+	default:
+		fmt.Fprintf(c.opts.Log, "dropping extra response to request %d\n", id)
+	}
+}
+
+func (c *Client) heartbeatLoop(ctx context.Context, l *link) {
+	defer l.wg.Done()
 	t := time.NewTicker(c.opts.HeartbeatInterval)
 	defer t.Stop()
 	hb := &pb.ToRadio{PayloadVariant: &pb.ToRadio_Heartbeat{Heartbeat: &pb.Heartbeat{}}}
@@ -247,10 +439,10 @@ func (c *Client) heartbeatLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-c.readerEnd:
+		case <-l.readerEnd:
 			return
 		case <-t.C:
-			if err := c.send(ctx, hb); err != nil {
+			if err := l.send(ctx, hb); err != nil {
 				fmt.Fprintf(c.opts.Log, "heartbeat: %v\n", err)
 			}
 		}
@@ -265,15 +457,19 @@ func (c *Client) State() *State {
 }
 
 // Kind reports the transport kind of the connection.
-func (c *Client) Kind() transport.Kind { return c.conn.Kind() }
+func (c *Client) Kind() transport.Kind { return c.current().conn.Kind() }
 
 // Close shuts the connection down and waits for the background goroutines.
 func (c *Client) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
-		c.cancel()
-		err = c.conn.Close()
-		c.wg.Wait()
+		c.connMu.Lock()
+		c.closed = true
+		l := c.cur
+		c.connMu.Unlock()
+		if l != nil {
+			err = l.close()
+		}
 	})
 	return err
 }

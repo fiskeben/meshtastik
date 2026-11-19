@@ -94,3 +94,14 @@ func TestHeartbeat(t *testing.T) {
 		t.Fatal(d.Heartbeats())
 	}
 }
+
+func TestOpenHandshakeCtxExpiryHasHint(t *testing.T) {
+	d := fakedevice.New()
+	d.Silent = true
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err := device.Open(ctx, d.Dialer(), device.Options{})
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "no response") {
+		t.Fatal(err)
+	}
+}
