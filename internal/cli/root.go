@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"meshtastik/internal/transport"
 )
 
 // version is set at build time via -ldflags "-X meshtastik/internal/cli.version=...".
@@ -23,8 +25,7 @@ type ConnFlags struct {
 
 // Deps carries the side-effecting dependencies of the commands.
 type Deps struct {
-	// Dial's return type becomes transport.Dialer in Task 3.
-	Dial    func(ConnFlags) (any, error)
+	Dial    func(ConnFlags) (transport.Dialer, error)
 	Stdout  io.Writer
 	Stderr  io.Writer
 	Confirm func(prompt string) bool
@@ -33,7 +34,7 @@ type Deps struct {
 // DefaultDeps returns dependencies wired to the real process environment.
 func DefaultDeps() Deps {
 	return Deps{
-		Dial: func(ConnFlags) (any, error) {
+		Dial: func(ConnFlags) (transport.Dialer, error) {
 			return nil, errors.New("no transport available yet")
 		},
 		Stdout:  os.Stdout,
