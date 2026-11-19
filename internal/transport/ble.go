@@ -21,7 +21,8 @@ const (
 	bleFromRadioUUID = "2c55e69e-4993-11ed-b878-0242ac120002"
 	bleFromNumUUID   = "ed9da18c-a800-4f66-a670-aa7547e34453"
 
-	bleScanCap = 10 * time.Second
+	bleScanCap       = 10 * time.Second
+	initialDrainWait = 250 * time.Millisecond
 )
 
 // BLEDevice is a device seen while scanning. On macOS Address is a
@@ -80,24 +81,26 @@ func (c *bleConn) shutdown(cause error) {
 // the BLE callback goroutine is never blocked.
 func (c *bleConn) notify() { go c.drain() }
 
-// drain reads FromRadio until the radio reports its queue empty.
-func (c *bleConn) drain() {
+// drain reads FromRadio until the radio reports its queue empty. A read error
+// closes the conn and is returned.
+func (c *bleConn) drain() error {
 	c.drainMu.Lock()
 	defer c.drainMu.Unlock()
 	buf := make([]byte, 512)
 	for {
 		select {
 		case <-c.done:
-			return
+			return nil
 		default:
 		}
 		n, err := c.link.ReadFromRadio(buf)
 		if err != nil {
-			c.shutdown(fmt.Errorf("read FromRadio: %w", err))
-			return
+			err = fmt.Errorf("read FromRadio: %w", err)
+			c.shutdown(err)
+			return err
 		}
 		if n == 0 {
-			return
+			return nil
 		}
 		var m pb.FromRadio
 		if err := proto.Unmarshal(buf[:n], &m); err != nil {
@@ -107,8 +110,29 @@ func (c *bleConn) drain() {
 		select {
 		case c.msgs <- &m:
 		case <-c.done:
-			return
+			return nil
 		}
+	}
+}
+
+// initialDrain starts the first drain without blocking on channel capacity
+// (no reader exists yet) and reports a failure that shows up promptly.
+func (c *bleConn) initialDrain(ctx context.Context) error {
+	errc := make(chan error, 1)
+	go func() { errc <- c.drain() }()
+	select {
+	case err := <-errc:
+		return err
+	case <-c.done:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(initialDrainWait):
+	}
+	select {
+	case <-c.done:
+		return c.cause
+	default:
+		return nil
 	}
 }
 
@@ -129,8 +153,7 @@ func (c *bleConn) Send(ctx context.Context, m *pb.ToRadio) error {
 		c.shutdown(fmt.Errorf("write ToRadio: %w", err))
 		return fmt.Errorf("%w: %v", ErrClosed, err)
 	}
-	c.drain()
-	return nil
+	return c.drain()
 }
 
 func (c *bleConn) Recv(ctx context.Context) (*pb.FromRadio, error) {
@@ -186,6 +209,8 @@ func scanFor(ctx context.Context, d time.Duration, visit func(r bluetooth.ScanRe
 	if err != nil {
 		return err
 	}
+	var stopOnce sync.Once
+	stop := func() { stopOnce.Do(func() { _ = a.StopScan() }) }
 	finished := make(chan struct{})
 	stopped := make(chan struct{})
 	go func() {
@@ -198,12 +223,11 @@ func scanFor(ctx context.Context, d time.Duration, visit func(r bluetooth.ScanRe
 		case <-finished:
 			return
 		}
-		_ = a.StopScan()
+		stop()
 	}()
-	var stopOnce sync.Once
 	err = a.Scan(func(a *bluetooth.Adapter, r bluetooth.ScanResult) {
 		if visit(r) {
-			stopOnce.Do(func() { _ = a.StopScan() })
+			stop()
 		}
 	})
 	close(finished)
@@ -253,6 +277,47 @@ func ScanBLE(ctx context.Context, d time.Duration) ([]BLEDevice, error) {
 	return out, nil
 }
 
+// connectGATT connects to addr, discovers the Meshtastic characteristics, wires
+// them into c and enables FromNum notifications. On error the device is
+// disconnected.
+func connectGATT(a *bluetooth.Adapter, addr bluetooth.Address, name string, c *bleConn) (bluetooth.Device, error) {
+	svc, _ := bluetooth.ParseUUID(bleServiceUUID)
+	dev, err := a.Connect(addr, bluetooth.ConnectionParams{})
+	if err != nil {
+		return dev, fmt.Errorf("connect %q: %w", name, err)
+	}
+	fail := func(err error) (bluetooth.Device, error) {
+		_ = dev.Disconnect()
+		return dev, err
+	}
+	services, err := dev.DiscoverServices([]bluetooth.UUID{svc})
+	if err != nil || len(services) == 0 {
+		return fail(fmt.Errorf("Meshtastic service %s not found on %q%s", bleServiceUUID, name, errSuffix(err)))
+	}
+	chars := map[string]bluetooth.DeviceCharacteristic{}
+	for cname, u := range map[string]string{"ToRadio": bleToRadioUUID, "FromRadio": bleFromRadioUUID, "FromNum": bleFromNumUUID} {
+		cu, _ := bluetooth.ParseUUID(u)
+		cs, err := services[0].DiscoverCharacteristics([]bluetooth.UUID{cu})
+		if err != nil || len(cs) == 0 {
+			return fail(fmt.Errorf("characteristic %s (%s) not found on %q%s", cname, u, name, errSuffix(err)))
+		}
+		chars[cname] = cs[0]
+	}
+	c.link = &gattLink{toRadio: chars["ToRadio"], fromRadio: chars["FromRadio"]}
+	fromNum := chars["FromNum"]
+	if err := fromNum.EnableNotifications(func([]byte) { c.notify() }); err != nil {
+		return fail(fmt.Errorf("enable FromNum notifications: %w", err))
+	}
+	return dev, nil
+}
+
+func errSuffix(err error) string {
+	if err == nil {
+		return ""
+	}
+	return ": " + err.Error()
+}
+
 // DialBLE finds the device whose name or address is nameOrAddr, connects and
 // returns a Conn over the Meshtastic GATT service.
 func DialBLE(ctx context.Context, nameOrAddr string, log io.Writer) (Conn, error) {
@@ -260,9 +325,12 @@ func DialBLE(ctx context.Context, nameOrAddr string, log io.Writer) (Conn, error
 		log = io.Discard
 	}
 	svc, _ := bluetooth.ParseUUID(bleServiceUUID)
+	var mu sync.Mutex
 	var found bluetooth.ScanResult
 	var ok bool
 	err := scanFor(ctx, bleScanCap, func(r bluetooth.ScanResult) bool {
+		mu.Lock()
+		defer mu.Unlock()
 		if ok {
 			return true
 		}
@@ -278,6 +346,8 @@ func DialBLE(ctx context.Context, nameOrAddr string, log io.Writer) (Conn, error
 	if err != nil {
 		return nil, fmt.Errorf("scan: %w", err)
 	}
+	mu.Lock()
+	defer mu.Unlock()
 	if !ok {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -288,33 +358,34 @@ func DialBLE(ctx context.Context, nameOrAddr string, log io.Writer) (Conn, error
 	if err != nil {
 		return nil, err
 	}
-	dev, err := a.Connect(found.Address, bluetooth.ConnectionParams{})
-	if err != nil {
-		return nil, fmt.Errorf("connect %q: %w", nameOrAddr, err)
+	// Connect and discovery are not cancellable; run them aside so ctx wins.
+	c := newBLEConn(nil, log)
+	type result struct {
+		dev bluetooth.Device
+		err error
 	}
-	fail := func(err error) (Conn, error) {
-		_ = dev.Disconnect()
-		return nil, err
-	}
-	services, err := dev.DiscoverServices([]bluetooth.UUID{svc})
-	if err != nil || len(services) == 0 {
-		return fail(fmt.Errorf("Meshtastic service %s not found on %q: %v", bleServiceUUID, nameOrAddr, err))
-	}
-	chars := map[string]bluetooth.DeviceCharacteristic{}
-	for name, u := range map[string]string{"ToRadio": bleToRadioUUID, "FromRadio": bleFromRadioUUID, "FromNum": bleFromNumUUID} {
-		cu, _ := bluetooth.ParseUUID(u)
-		cs, err := services[0].DiscoverCharacteristics([]bluetooth.UUID{cu})
-		if err != nil || len(cs) == 0 {
-			return fail(fmt.Errorf("characteristic %s (%s) not found on %q: %v", name, u, nameOrAddr, err))
+	resc := make(chan result, 1)
+	go func() {
+		dev, err := connectGATT(a, found.Address, nameOrAddr, c)
+		resc <- result{dev, err}
+	}()
+	select {
+	case r := <-resc:
+		if r.err != nil {
+			return nil, r.err
 		}
-		chars[name] = cs[0]
+		c.onClose = func() { _ = r.dev.Disconnect() }
+		if err := c.initialDrain(ctx); err != nil {
+			c.Close()
+			return nil, fmt.Errorf("initial read: %w", err)
+		}
+		return c, nil
+	case <-ctx.Done():
+		go func() { // drop a late-arriving connection
+			if r := <-resc; r.err == nil {
+				_ = r.dev.Disconnect()
+			}
+		}()
+		return nil, ctx.Err()
 	}
-	fromNum := chars["FromNum"]
-	c := newBLEConn(&gattLink{toRadio: chars["ToRadio"], fromRadio: chars["FromRadio"]}, log)
-	c.onClose = func() { _ = dev.Disconnect() }
-	if err := fromNum.EnableNotifications(func([]byte) { c.notify() }); err != nil {
-		return fail(fmt.Errorf("enable FromNum notifications: %w", err))
-	}
-	c.drain()
-	return c, nil
 }

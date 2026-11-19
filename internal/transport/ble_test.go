@@ -64,7 +64,10 @@ func TestBLESendWritesRawProtoAndDrains(t *testing.T) {
 	if err := c.Send(ctxT(t), &pb.ToRadio{PayloadVariant: &pb.ToRadio_WantConfigId{WantConfigId: 1}}); err != nil {
 		t.Fatal(err)
 	}
-	if len(l.written) != 1 || l.written[0][0] == 0x94 {
+	l.mu.Lock()
+	w := l.written
+	l.mu.Unlock()
+	if len(w) != 1 || w[0][0] == 0x94 {
 		t.Fatal("must write unframed protobuf")
 	}
 	if m, _ := c.Recv(ctxT(t)); m.Id != 9 {
@@ -95,6 +98,32 @@ func TestBLECloseUnblocksRecvAndIsIdempotent(t *testing.T) {
 	}
 	if err := c.Send(ctxT(t), &pb.ToRadio{}); !errors.Is(err, ErrClosed) {
 		t.Fatalf("send after close: %v", err)
+	}
+}
+
+func TestBLEInitialDrainDoesNotBlockOnFullChannel(t *testing.T) {
+	l := &fakeLink{}
+	for i := uint32(1); i <= 100; i++ {
+		l.queue = append(l.queue, fr(i))
+	}
+	c := newBLEConn(l, io.Discard)
+	defer c.Close()
+	if err := c.initialDrain(ctxT(t)); err != nil {
+		t.Fatal(err)
+	}
+	for want := uint32(1); want <= 100; want++ {
+		m, err := c.Recv(ctxT(t))
+		if err != nil || m.Id != want {
+			t.Fatal(want, m, err)
+		}
+	}
+}
+
+func TestBLEInitialDrainReportsReadError(t *testing.T) {
+	c := newBLEConn(&fakeLink{readErr: errors.New("boom")}, io.Discard)
+	defer c.Close()
+	if err := c.initialDrain(ctxT(t)); err == nil {
+		t.Fatal("want error")
 	}
 }
 
