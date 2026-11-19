@@ -3,6 +3,7 @@
 package backup
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -266,12 +267,17 @@ func asLocation(v any) (*Location, error) {
 	return &loc, nil
 }
 
+// Skip is a field present in the file that was not applied, and why.
+type Skip struct{ Path, Reason string }
+
 // MergeConfig overlays the file's config sections onto a clone of base. Only
 // keys present in the file overwrite base; absent keys keep it. A nested
 // message inside a section (e.g. network.ipv4_config) is replaced as a whole
 // when present. security.private_key and security.public_key are not applied
-// unless withKeys; they are listed in skipped when present with a value.
-func (d *Doc) MergeConfig(base *pb.LocalConfig, withKeys bool) (*pb.LocalConfig, []string, error) {
+// unless withKeys; they are listed in skipped when present with a value. Even
+// with withKeys, neither is applied when either is present but not 32 bytes,
+// since the firmware would then generate a new key pair (a new identity).
+func (d *Doc) MergeConfig(base *pb.LocalConfig, withKeys bool) (*pb.LocalConfig, []Skip, error) {
 	out := proto.Clone(base).(*pb.LocalConfig)
 	skipped, err := merge(out.ProtoReflect(), d.config, withKeys)
 	return out, skipped, err
@@ -295,7 +301,72 @@ func findField(d protoreflect.MessageDescriptor, name string) protoreflect.Field
 	return nil
 }
 
-func merge(dst protoreflect.Message, sections map[string]any, withKeys bool) (skipped []string, err error) {
+// isKey reports whether f is security.private_key or security.public_key.
+func isKey(section string, f protoreflect.FieldDescriptor) bool {
+	return section == "security" && (f.TextName() == "private_key" || f.TextName() == "public_key")
+}
+
+// keyLen returns the decoded length of a base64 bytes value from the file;
+// ok is false when v is not a decodable string (protojson reports that).
+func keyLen(v any) (n int, ok bool) {
+	s, isStr := v.(string)
+	if !isStr {
+		return 0, false
+	}
+	s = strings.TrimRight(strings.TrimPrefix(s, base64Prefix), "=")
+	for _, enc := range []*base64.Encoding{base64.RawStdEncoding, base64.RawURLEncoding} {
+		if b, err := enc.DecodeString(s); err == nil {
+			return len(b), true
+		}
+	}
+	return 0, false
+}
+
+// keySkips decides which key fields of the security section fieldsIn are
+// not applied: the reason, or "" to skip silently.
+func keySkips(sec protoreflect.MessageDescriptor, fieldsIn map[string]any, withKeys bool) map[string]string {
+	present := map[string]any{}
+	for k, v := range fieldsIn {
+		if f := findField(sec, k); f != nil && isKey("security", f) {
+			present[f.TextName()] = v
+		}
+	}
+	out := map[string]string{}
+	if !withKeys {
+		for name, v := range present {
+			out[name] = ""
+			if s, _ := v.(string); strings.TrimPrefix(s, base64Prefix) != "" {
+				out[name] = "pass --keys to apply"
+			}
+		}
+		return out
+	}
+	const newIdentity = "would make the node generate a new identity"
+	for name, v := range present {
+		switch n, ok := keyLen(v); {
+		case !ok || n == 32:
+		case n == 0:
+			out[name] = "empty in file; " + newIdentity
+		default:
+			out[name] = fmt.Sprintf("%d bytes in file, not 32; %s", n, newIdentity)
+		}
+	}
+	if len(out) == 0 {
+		return out
+	}
+	for name := range present {
+		if _, bad := out[name]; !bad {
+			other := "public_key"
+			if name == "public_key" {
+				other = "private_key"
+			}
+			out[name] = "not applied without a valid security." + other
+		}
+	}
+	return out
+}
+
+func merge(dst protoreflect.Message, sections map[string]any, withKeys bool) (skipped []Skip, err error) {
 	names := make([]string, 0, len(sections))
 	for k := range sections {
 		names = append(names, k)
@@ -314,6 +385,10 @@ func merge(dst protoreflect.Message, sections map[string]any, withKeys bool) (sk
 			return nil, fmt.Errorf("section %q must be a mapping", name)
 		}
 		sec := dst.Mutable(sf).Message()
+		var skipKey map[string]string
+		if sf.TextName() == "security" {
+			skipKey = keySkips(sec.Descriptor(), fieldsIn, withKeys)
+		}
 		keys := make([]string, 0, len(fieldsIn))
 		for k := range fieldsIn {
 			keys = append(keys, k)
@@ -326,9 +401,9 @@ func merge(dst protoreflect.Message, sections map[string]any, withKeys bool) (sk
 			}
 			val := fieldsIn[key]
 			path := sf.TextName() + "." + ff.TextName()
-			if !withKeys && sf.TextName() == "security" && (ff.TextName() == "private_key" || ff.TextName() == "public_key") {
-				if s, _ := val.(string); strings.TrimPrefix(s, base64Prefix) != "" {
-					skipped = append(skipped, path)
+			if reason, skip := skipKey[ff.TextName()]; skip && isKey(sf.TextName(), ff) {
+				if reason != "" {
+					skipped = append(skipped, Skip{Path: path, Reason: reason})
 				}
 				continue
 			}

@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,9 +13,7 @@ import (
 
 	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
 	"github.com/spf13/cobra"
-	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
-	"sigs.k8s.io/yaml"
 
 	"meshtastik/internal/backup"
 	"meshtastik/internal/channelurl"
@@ -22,9 +22,23 @@ import (
 )
 
 // confirmOrAbort returns nil when --yes was given or the user confirms prompt.
-func confirmOrAbort(a *app, prompt string) error {
-	if a.yes || (a.Confirm != nil && a.Confirm(prompt)) {
+// An interrupt (ctx done) while waiting for the answer aborts.
+func confirmOrAbort(ctx context.Context, a *app, prompt string) error {
+	if a.yes {
 		return nil
+	}
+	if a.Confirm != nil {
+		answer := make(chan bool, 1)
+		go func() { answer <- a.Confirm(prompt) }()
+		select {
+		case ok := <-answer:
+			if ok {
+				return nil
+			}
+		case <-ctx.Done():
+			fmt.Fprintln(a.Stderr) // end the prompt line
+			return errors.New("interrupted; nothing was changed")
+		}
 	}
 	return errors.New("not confirmed; nothing was changed (pass --yes to skip confirmation)")
 }
@@ -55,10 +69,15 @@ func newConfigGetCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			sec := configpath.Section(st.Config, st.ModuleConfig, p)
 			if p.Field == "" {
-				return printProto(a.Stdout, sec.Interface(), a.asJSON)
+				sec := configpath.Section(redactKey(st.Config), st.ModuleConfig, p)
+				raw, err := protoOutput.Marshal(sec.Interface())
+				if err != nil {
+					return err
+				}
+				return printRaw(a.Stdout, unredact(raw), a.asJSON)
 			}
+			sec := configpath.Section(st.Config, st.ModuleConfig, p)
 			v, err := configpath.FormatField(sec, p.Field)
 			if err != nil {
 				return err
@@ -72,34 +91,47 @@ func newConfigGetCmd(a *app) *cobra.Command {
 	}
 }
 
+// redactedKey is shown instead of a non-empty security.private_key: config
+// get never prints the key unless that exact field is asked for.
+const redactedKey = "<redacted; use config export>"
+
+// keySentinel stands in for the private key while marshalling; unredact then
+// swaps its base64 form for redactedKey.
+var keySentinel = []byte("meshtastik:redacted-private-key")
+
+// redactKey returns cfg, or a copy with a non-empty private key replaced by
+// keySentinel.
+func redactKey(cfg *pb.LocalConfig) *pb.LocalConfig {
+	if len(cfg.GetSecurity().GetPrivateKey()) == 0 {
+		return cfg
+	}
+	out := proto.Clone(cfg).(*pb.LocalConfig)
+	out.Security.PrivateKey = keySentinel
+	return out
+}
+
+// unredact replaces the JSON string holding keySentinel with redactedKey.
+func unredact(raw []byte) []byte {
+	quoted := func(s string) []byte { return []byte(`"` + s + `"`) }
+	return bytes.ReplaceAll(raw, quoted(base64.StdEncoding.EncodeToString(keySentinel)), quoted(redactedKey))
+}
+
 func printAllConfig(a *app, st *device.State) error {
-	mo := protojson.MarshalOptions{UseProtoNames: true}
-	cfg, err := mo.Marshal(st.Config)
+	cfg, err := protoOutput.Marshal(redactKey(st.Config))
 	if err != nil {
 		return err
 	}
-	mod, err := mo.Marshal(st.ModuleConfig)
+	mod, err := protoOutput.Marshal(st.ModuleConfig)
 	if err != nil {
 		return err
 	}
-	raw, err := json.Marshal(map[string]json.RawMessage{"config": cfg, "module_config": mod})
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(map[string]json.RawMessage{"config": unredact(cfg), "module_config": mod}); err != nil {
 		return err
 	}
-	if a.asJSON {
-		var buf bytes.Buffer
-		if err := json.Indent(&buf, raw, "", "  "); err != nil {
-			return err
-		}
-		_, err = fmt.Fprintln(a.Stdout, buf.String())
-		return err
-	}
-	y, err := yaml.JSONToYAML(raw)
-	if err != nil {
-		return err
-	}
-	_, err = a.Stdout.Write(y)
-	return err
+	return printRaw(a.Stdout, buf.Bytes(), a.asJSON)
 }
 
 func newConfigSetCmd(a *app) *cobra.Command {
@@ -153,11 +185,14 @@ func newConfigSetCmd(a *app) *cobra.Command {
 // applyChanges checks changes for lock-out risks, confirms if there are any,
 // applies them with read-back verification and reports the result.
 func applyChanges(cmd *cobra.Command, a *app, c *device.Client, changes []device.Change) error {
+	if err := device.ManagedRefusal(c.State(), changes); err != nil {
+		return err
+	}
 	if risks := device.LockoutRisks(c.Kind(), c.State(), changes); len(risks) > 0 {
 		for _, r := range risks {
 			fmt.Fprintf(a.Stderr, "Warning: %s\n", r)
 		}
-		if err := confirmOrAbort(a, "Apply anyway?"); err != nil {
+		if err := confirmOrAbort(cmd.Context(), a, "Apply anyway?"); err != nil {
 			return err
 		}
 	}
@@ -220,6 +255,16 @@ func newConfigImportCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if doc.Owner != "" {
+				if err := checkLongName(doc.Owner); err != nil {
+					return fmt.Errorf("owner: %w", err)
+				}
+			}
+			if doc.OwnerShort != "" {
+				if err := checkShortName(doc.OwnerShort); err != nil {
+					return fmt.Errorf("owner_short: %w", err)
+				}
+			}
 			var set *pb.ChannelSet
 			if doc.ChannelURL != "" {
 				if set, err = channelurl.Decode(doc.ChannelURL); err != nil {
@@ -263,33 +308,42 @@ func newConfigImportCmd(a *app) *cobra.Command {
 			for _, s := range ms {
 				changes = append(changes, device.Change{ModuleConfig: s})
 			}
-			self := st.Self()
 			if doc.Owner != "" || doc.OwnerShort != "" {
-				owner := &pb.User{LongName: self.GetUser().GetLongName(), ShortName: self.GetUser().GetShortName()}
+				// Start from the current User so fields the file lacks
+				// (is_licensed and the rest) are kept, as owner set does.
+				cur := st.Self().GetUser()
+				owner := &pb.User{}
+				if cur != nil {
+					owner = proto.Clone(cur).(*pb.User)
+				}
 				if doc.Owner != "" {
 					owner.LongName = doc.Owner
 				}
 				if doc.OwnerShort != "" {
 					owner.ShortName = doc.OwnerShort
 				}
-				if owner.LongName != self.GetUser().GetLongName() || owner.ShortName != self.GetUser().GetShortName() {
+				if owner.LongName == "" || owner.ShortName == "" {
+					return errors.New("the node did not report its current owner; the backup must set both owner and owner_short")
+				}
+				if owner.LongName != cur.GetLongName() || owner.ShortName != cur.GetShortName() {
 					changes = append(changes, device.Change{Owner: owner})
 				}
 			}
 			if l := doc.Location; l != nil {
-				pos := &pb.Position{
-					LatitudeI:  proto.Int32(int32(math.Round(l.Lat * 1e7))),
-					LongitudeI: proto.Int32(int32(math.Round(l.Lon * 1e7))),
-					Altitude:   proto.Int32(l.Alt),
-				}
-				cur := self.GetPosition()
-				if !st.Config.GetPosition().GetFixedPosition() || cur.GetLatitudeI() != pos.GetLatitudeI() ||
-					cur.GetLongitudeI() != pos.GetLongitudeI() || cur.GetAltitude() != pos.GetAltitude() {
-					changes = append(changes, device.Change{FixedPosition: pos})
+				// Python backups carry the GPS position too; only a fixed
+				// position is meant to be restored.
+				if !cfg.GetPosition().GetFixedPosition() {
+					fmt.Fprintln(a.Stderr, "note: location ignored (position.fixed_position is false in this backup)")
+				} else {
+					changes = append(changes, device.Change{FixedPosition: &pb.Position{
+						LatitudeI:  proto.Int32(int32(math.Round(l.Lat * 1e7))),
+						LongitudeI: proto.Int32(int32(math.Round(l.Lon * 1e7))),
+						Altitude:   proto.Int32(l.Alt),
+					}})
 				}
 			}
 			for _, k := range skipped {
-				fmt.Fprintf(a.Stderr, "skipped: %s (pass --keys to apply)\n", k)
+				fmt.Fprintf(a.Stderr, "skipped: %s (%s)\n", k.Path, k.Reason)
 			}
 			for _, k := range doc.Unsupported {
 				fmt.Fprintf(a.Stderr, "not supported, ignored: %s\n", k)

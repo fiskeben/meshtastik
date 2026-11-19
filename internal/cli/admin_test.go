@@ -37,7 +37,7 @@ func TestOwnerSetKeepsShort(t *testing.T) {
 func TestReboot(t *testing.T) {
 	d := fakedevice.New()
 	out, _, err := runCLI(t, d, "", "reboot")
-	if err != nil || !strings.Contains(out, "Rebooting") || d.LastAdmin().GetRebootSeconds() != 5 {
+	if err != nil || out != "Reboot requested (node restarts in ~5 seconds).\n" || d.LastAdmin().GetRebootSeconds() != 5 {
 		t.Fatal(out, err)
 	}
 }
@@ -47,8 +47,9 @@ func TestShutdownConfirm(t *testing.T) {
 	if _, _, err := runCLI(t, d, "n\n", "shutdown"); err == nil || d.LastAdmin().GetShutdownSeconds() != 0 {
 		t.Fatal("shutdown without confirm")
 	}
-	if _, _, err := runCLI(t, d, "", "--yes", "shutdown"); err != nil || d.LastAdmin().GetShutdownSeconds() != 5 {
-		t.Fatal(err)
+	out, _, err := runCLI(t, d, "", "--yes", "shutdown")
+	if err != nil || out != "Shutdown requested (node powers off in ~5 seconds).\n" || d.LastAdmin().GetShutdownSeconds() != 5 {
+		t.Fatal(out, err)
 	}
 }
 

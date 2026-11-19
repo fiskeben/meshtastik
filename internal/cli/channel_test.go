@@ -165,3 +165,17 @@ func TestChannelURLSetNeedsConfirm(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestChannelURLSetRefusesAddURL(t *testing.T) {
+	u, _ := channelurl.Encode(chans(), &pb.Config_LoRaConfig{Region: pb.Config_LoRaConfig_US})
+	for _, add := range []string{strings.Replace(u, "/e/#", "/e/?add=true#", 1), u + "?add=true"} {
+		d := fakedevice.New()
+		_, _, err := runCLI(t, d, "", "--yes", "channel", "url", "--set", add)
+		if err == nil || err.Error() != "add-style channel URLs are not supported yet; use channel add" {
+			t.Fatal(add, err)
+		}
+		if fakedevice.CountBegin(d.Received()) != 0 || d.Dials() != 0 {
+			t.Fatal("touched the node")
+		}
+	}
+}

@@ -3,6 +3,7 @@ package backup
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"os"
 	"slices"
 	"strings"
@@ -60,7 +61,8 @@ func TestMergeConfigPresenceSemantics(t *testing.T) {
 	if !bytes.Equal(got.Security.PrivateKey, []byte{1}) || len(got.Security.AdminKey) != 1 {
 		t.Error("key handling")
 	}
-	if !slices.Contains(skipped, "security.private_key") || !slices.Contains(skipped, "security.public_key") {
+	want := []Skip{{"security.private_key", "pass --keys to apply"}, {"security.public_key", "pass --keys to apply"}}
+	if !slices.Equal(skipped, want) {
 		t.Error(skipped)
 	}
 	got, _, _ = d.MergeConfig(base, true)
@@ -74,6 +76,44 @@ func TestSkippedOnlyWhenPresent(t *testing.T) {
 	_, skipped, err := d.MergeConfig(&pb.LocalConfig{}, false)
 	if err != nil || len(skipped) != 0 {
 		t.Fatal(skipped, err)
+	}
+}
+
+func TestMergeWithKeysRefusesNewIdentity(t *testing.T) {
+	key := func(b byte, n int) string {
+		return "base64:" + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{b}, n))
+	}
+	cases := []struct {
+		yaml string
+		want []Skip
+	}{
+		{"{privateKey: 'base64:', publicKey: '" + key(4, 32) + "'}", []Skip{
+			{"security.private_key", "empty in file; would make the node generate a new identity"},
+			{"security.public_key", "not applied without a valid security.private_key"}}},
+		{"{privateKey: '" + key(5, 16) + "', publicKey: '" + key(4, 32) + "'}", []Skip{
+			{"security.private_key", "16 bytes in file, not 32; would make the node generate a new identity"},
+			{"security.public_key", "not applied without a valid security.private_key"}}},
+		{"{privateKey: '" + key(5, 32) + "', publicKey: ''}", []Skip{
+			{"security.private_key", "not applied without a valid security.public_key"},
+			{"security.public_key", "empty in file; would make the node generate a new identity"}}},
+		{"{privateKey: '" + key(5, 32) + "', publicKey: '" + key(4, 32) + "'}", nil},
+	}
+	for i, c := range cases {
+		d, err := Read([]byte("config: {security: " + c.yaml + "}"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		base := &pb.LocalConfig{Security: &pb.Config_SecurityConfig{PrivateKey: bytes.Repeat([]byte{1}, 32), PublicKey: bytes.Repeat([]byte{2}, 32)}}
+		got, skipped, err := d.MergeConfig(base, true)
+		if err != nil || !slices.Equal(skipped, c.want) {
+			t.Errorf("case %d: %v %v", i, skipped, err)
+		}
+		if c.want != nil && (got.Security.PrivateKey[0] != 1 || got.Security.PublicKey[0] != 2) {
+			t.Errorf("case %d: keys applied", i)
+		}
+		if c.want == nil && (got.Security.PrivateKey[0] != 5 || got.Security.PublicKey[0] != 4) {
+			t.Errorf("case %d: valid keys not applied", i)
+		}
 	}
 }
 

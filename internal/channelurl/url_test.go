@@ -57,3 +57,18 @@ func TestToChannels(t *testing.T) {
 		t.Fatal(c)
 	}
 }
+
+func TestAddOnly(t *testing.T) {
+	for url, want := range map[string]bool{
+		"https://meshtastic.org/e/#CgMSAQE":              false,
+		"https://meshtastic.org/e/?add=true#CgMSAQE":     true,
+		"https://meshtastic.org/e/#CgMSAQE?add=true":     true,
+		"https://meshtastic.org/e/#CgMSAQE?add=TRUE":     true,
+		"https://meshtastic.org/e/?add=false#CgMSAQE":    false,
+		"https://meshtastic.org/e/?other=1#CgMSAQE?x=on": false,
+	} {
+		if got := AddOnly(url); got != want {
+			t.Errorf("%s: %v", url, got)
+		}
+	}
+}

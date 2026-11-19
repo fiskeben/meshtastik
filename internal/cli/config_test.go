@@ -2,14 +2,19 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
 
+	"meshtastik/internal/device"
 	"meshtastik/internal/fakedevice"
 	"meshtastik/internal/transport"
 )
@@ -139,6 +144,7 @@ func TestImportClonesWithoutIdentity(t *testing.T) {
 	a := fakedevice.New()
 	a.Config.Lora.HopLimit = 6
 	a.Config.Security.PrivateKey = bytes.Repeat([]byte{1}, 32)
+	a.Config.Security.PublicKey = bytes.Repeat([]byte{3}, 32) // a real node always has both
 	p := filepath.Join(t.TempDir(), "a.yaml")
 	if _, _, err := runCLI(t, a, "", "config", "export", "-o", p); err != nil {
 		t.Fatal(err)
@@ -176,7 +182,8 @@ func TestImportLocationAndChannelURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := filepath.Join(t.TempDir(), "x.yaml")
-	y := "channel_url: '" + strings.TrimSpace(u) + "'\nlocation: {lat: 59.9139, lon: 10.7522, alt: 23}\n"
+	y := "channel_url: '" + strings.TrimSpace(u) + "'\nlocation: {lat: 59.9139, lon: 10.7522, alt: 23}\n" +
+		"config: {position: {fixedPosition: true}}\n"
 	if err := os.WriteFile(p, []byte(y), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -199,5 +206,160 @@ func TestImportLocationAndChannelURL(t *testing.T) {
 	}
 	if pos == nil || pos.GetLatitudeI() != 599139000 || pos.GetLongitudeI() != 107522000 || pos.GetAltitude() != 23 {
 		t.Fatal(pos)
+	}
+}
+
+func writeBackup(t *testing.T, y string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "b.yaml")
+	if err := os.WriteFile(p, []byte(y), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestConfigGetRedactsPrivateKey(t *testing.T) {
+	d := fakedevice.New()
+	d.Config.Security.PrivateKey = bytes.Repeat([]byte{0xab}, 32)
+	secret := base64.StdEncoding.EncodeToString(d.Config.Security.PrivateKey)
+	for _, args := range [][]string{{"config", "get"}, {"config", "get", "--json"}, {"config", "get", "security"}, {"config", "get", "security", "--json"}} {
+		out, _, err := runCLI(t, d, "", args...)
+		if err != nil || strings.Contains(out, secret) || !strings.Contains(out, "<redacted; use config export>") {
+			t.Error(args, err, out)
+		}
+	}
+	if out, _, err := runCLI(t, d, "", "config", "get", "security.private_key"); err != nil || out != "base64:"+secret+"\n" {
+		t.Fatal(err, out)
+	}
+}
+
+func TestConfigGetShowsZeroValues(t *testing.T) {
+	d := fakedevice.New()
+	d.Config.Bluetooth.Enabled = false
+	if out, _, err := runCLI(t, d, "", "config", "get", "bluetooth"); err != nil || !strings.Contains(out, "enabled: false") {
+		t.Fatal(err, out)
+	}
+	if out, _, err := runCLI(t, d, "", "config", "get", "--json"); err != nil || !strings.Contains(out, `"fixed_position": false`) {
+		t.Fatal(err, out)
+	}
+}
+
+func TestImportOwnerKeepsOtherUserFields(t *testing.T) {
+	d := fakedevice.New()
+	d.Owner.IsLicensed = true
+	if _, stderr, err := runCLI(t, d, "", "config", "import", writeBackup(t, "owner: New Name\n")); err != nil {
+		t.Fatal(err, stderr)
+	}
+	if d.Owner.LongName != "New Name" || d.Owner.ShortName != "TEST" || !d.Owner.IsLicensed || d.Owner.HwModel != pb.HardwareModel_HELTEC_V3 {
+		t.Fatal(d.Owner)
+	}
+}
+
+func TestImportOwnerLengthsCheckedBeforeConnecting(t *testing.T) {
+	d := fakedevice.New()
+	if _, _, err := runCLI(t, d, "", "config", "import", writeBackup(t, "owner: "+strings.Repeat("x", 40)+"\n")); err == nil || !strings.Contains(err.Error(), "39 bytes") {
+		t.Fatal(err)
+	}
+	if _, _, err := runCLI(t, d, "", "config", "import", writeBackup(t, "owner_short: ABCDE\n")); err == nil || !strings.Contains(err.Error(), "4 bytes") {
+		t.Fatal(err)
+	}
+	if d.Dials() != 0 {
+		t.Fatal("connected before validating", d.Dials())
+	}
+}
+
+func TestImportKeysRefusesInvalidPrivateKey(t *testing.T) {
+	pub := "base64:" + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{4}, 32))
+	cases := []struct{ priv, reason string }{
+		{"base64:", "skipped: security.private_key (empty in file; would make the node generate a new identity)"},
+		{"base64:" + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{5}, 16)), "skipped: security.private_key (16 bytes in file, not 32; would make the node generate a new identity)"},
+	}
+	for _, c := range cases {
+		d := fakedevice.New()
+		d.Config.Security.PrivateKey = bytes.Repeat([]byte{2}, 32)
+		d.Config.Security.PublicKey = bytes.Repeat([]byte{3}, 32)
+		y := "config: {security: {privateKey: '" + c.priv + "', publicKey: '" + pub + "'}, lora: {hopLimit: 6}}\n"
+		_, stderr, err := runCLI(t, d, "", "config", "import", "--keys", writeBackup(t, y))
+		if err != nil || d.Config.Lora.HopLimit != 6 {
+			t.Fatal(err, stderr)
+		}
+		if !bytes.Equal(d.Config.Security.PrivateKey, bytes.Repeat([]byte{2}, 32)) || !bytes.Equal(d.Config.Security.PublicKey, bytes.Repeat([]byte{3}, 32)) {
+			t.Fatal("keys applied", d.Config.Security)
+		}
+		if !strings.Contains(stderr, c.reason) || !strings.Contains(stderr, "skipped: security.public_key (") {
+			t.Fatal(stderr)
+		}
+	}
+}
+
+func TestImportIgnoresLocationWithoutFixedPosition(t *testing.T) {
+	d := fakedevice.New()
+	y := "location: {lat: 59.9139, lon: 10.7522, alt: 23}\nconfig: {position: {fixedPosition: false}}\n"
+	_, stderr, err := runCLI(t, d, "", "config", "import", writeBackup(t, y))
+	if err != nil || !strings.Contains(stderr, "note: location ignored (position.fixed_position is false in this backup)") {
+		t.Fatal(err, stderr)
+	}
+	for _, m := range d.Received() {
+		if m.GetSetFixedPosition() != nil {
+			t.Fatal("fixed position set")
+		}
+	}
+}
+
+func TestConfigSetRefusedOnManagedNode(t *testing.T) {
+	d := fakedevice.New()
+	d.Config.Security.IsManaged = true
+	_, _, err := runCLI(t, d, "", "--yes", "config", "set", "lora.hop_limit", "5")
+	if err == nil || err.Error() != "node is managed (security.is_managed); local configuration changes are ignored by the firmware" {
+		t.Fatal(err)
+	}
+	if fakedevice.CountBegin(d.Received()) != 0 {
+		t.Fatal("began an edit")
+	}
+	if _, _, err := runCLI(t, d, "", "--yes", "config", "set", "security.is_managed", "false"); err != nil || d.Config.Security.IsManaged {
+		t.Fatal(err)
+	}
+}
+
+func TestInterruptBeforeCommitReportsPartialEdit(t *testing.T) {
+	d := fakedevice.New()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d.OnAdmin = func(m *pb.AdminMessage) {
+		if m.GetBeginEditSettings() {
+			cancel()
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	_, _, err := runCLICtx(t, ctx, d, nil, "config", "set", "lora.hop_limit", "5")
+	if !errors.Is(err, device.ErrPartialEdit) {
+		t.Fatal(err)
+	}
+}
+
+func TestInterruptAtConfirmationAborts(t *testing.T) {
+	d := fakedevice.New()
+	d.Kind = transport.KindBLE
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	block := make(chan struct{})
+	defer close(block)
+	confirm := func(string) bool {
+		cancel()
+		<-block // the user never answers
+		return true
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := runCLICtx(t, ctx, d, confirm, "config", "set", "bluetooth.enabled", "false")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "interrupted; nothing was changed") || !d.Config.Bluetooth.Enabled {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("confirmation prompt ignored the interrupt")
 	}
 }

@@ -3,6 +3,7 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -153,14 +154,28 @@ func (a *app) connect(cmd *cobra.Command) (*device.Client, error) {
 	return device.Open(ctx, dial, opts)
 }
 
+// protoOutput renders messages for display: proto field names, and zero
+// values shown rather than omitted (region UNSET, enabled false).
+var protoOutput = protojson.MarshalOptions{UseProtoNames: true, EmitUnpopulated: true}
+
 // printProto writes m as YAML, or as indented JSON when asJSON is set.
 func printProto(w io.Writer, m proto.Message, asJSON bool) error {
-	raw, err := protojson.MarshalOptions{Indent: "  ", UseProtoNames: true}.Marshal(m)
+	raw, err := protoOutput.Marshal(m)
 	if err != nil {
 		return err
 	}
+	return printRaw(w, raw, asJSON)
+}
+
+// printRaw writes the JSON raw as YAML, or as indented JSON when asJSON is set.
+func printRaw(w io.Writer, raw []byte, asJSON bool) error {
 	if asJSON {
-		_, err = fmt.Fprintf(w, "%s\n", raw)
+		var buf bytes.Buffer
+		if err := json.Indent(&buf, raw, "", "  "); err != nil {
+			return err
+		}
+		buf.WriteByte('\n')
+		_, err := buf.WriteTo(w)
 		return err
 	}
 	y, err := yaml.JSONToYAML(raw)
@@ -228,7 +243,7 @@ func NewRoot(d Deps) *cobra.Command {
 	pf.BoolVar(&a.asJSON, "json", false, "output JSON")
 	pf.BoolVar(&a.yes, "yes", false, "skip confirmations")
 	pf.BoolVar(&a.debug, "debug", false, "debug logging")
-	pf.DurationVar(&a.timeout, "timeout", 0, "operation timeout (0 = per-transport default)")
+	pf.DurationVar(&a.timeout, "timeout", 0, "timeout that bounds the handshake and each request, not the whole operation (0 = per-transport default)")
 
 	root.AddCommand(&cobra.Command{
 		Use:   "version",

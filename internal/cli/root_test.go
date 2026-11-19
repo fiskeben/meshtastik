@@ -59,3 +59,15 @@ func TestDefaultHandshakeTimeoutPerKind(t *testing.T) {
 		t.Fatal()
 	}
 }
+
+func TestTimeoutHelpSaysWhatItBounds(t *testing.T) {
+	var out bytes.Buffer
+	root := NewRoot(Deps{Stdout: &out, Stderr: io.Discard})
+	root.SetArgs([]string{"--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "bounds the handshake and each request, not the whole operation") {
+		t.Fatal(out.String())
+	}
+}

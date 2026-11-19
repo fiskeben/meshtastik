@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	neturl "net/url"
 	"strings"
 
 	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
@@ -67,6 +68,19 @@ func Decode(url string) (*pb.ChannelSet, error) {
 		return nil, errors.New("channel URL contains no channels")
 	}
 	return set, nil
+}
+
+// AddOnly reports whether url asks to add its channels to the node's rather
+// than replace them: an "add=true" query, before or after the '#'.
+func AddOnly(url string) bool {
+	for part := range strings.SplitSeq(url, "#") {
+		if _, query, ok := strings.Cut(part, "?"); ok {
+			if q, err := neturl.ParseQuery(query); err == nil && strings.EqualFold(q.Get("add"), "true") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ToChannels lays the set out as device channels: [0] PRIMARY, then

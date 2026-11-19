@@ -17,6 +17,26 @@ const (
 	powerDelay   = 5 // seconds
 )
 
+func checkLongName(s string) error {
+	if s == "" {
+		return errors.New("long name must not be empty")
+	}
+	if len(s) > maxLongName {
+		return fmt.Errorf("long name is %d bytes; the limit is %d bytes", len(s), maxLongName)
+	}
+	return nil
+}
+
+func checkShortName(s string) error {
+	if s == "" {
+		return errors.New("short name must not be empty")
+	}
+	if len(s) > maxShortName {
+		return fmt.Errorf("short name is %d bytes; the limit is %d bytes", len(s), maxShortName)
+	}
+	return nil
+}
+
 func newOwnerCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{Use: "owner", Short: "Change the node's owner names"}
 	var short string
@@ -26,18 +46,14 @@ func newOwnerCmd(a *app) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			long := args[0]
-			if len(long) > maxLongName {
-				return fmt.Errorf("long name is %d bytes; the limit is %d bytes", len(long), maxLongName)
-			}
-			if long == "" {
-				return errors.New("long name must not be empty")
+			if err := checkLongName(long); err != nil {
+				return err
 			}
 			shortSet := cmd.Flags().Changed("short")
-			if shortSet && short == "" {
-				return errors.New("short name must not be empty")
-			}
-			if shortSet && len(short) > maxShortName {
-				return fmt.Errorf("short name is %d bytes; the limit is %d bytes", len(short), maxShortName)
+			if shortSet {
+				if err := checkShortName(short); err != nil {
+					return err
+				}
 			}
 			c, err := a.connect(cmd)
 			if err != nil {
@@ -67,7 +83,7 @@ func newOwnerCmd(a *app) *cobra.Command {
 func newRebootCmd(a *app) *cobra.Command {
 	return &cobra.Command{
 		Use:   "reboot",
-		Short: "Reboot the node in 5 seconds",
+		Short: "Ask the node to reboot (it restarts in ~5 seconds)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := a.connect(cmd)
@@ -78,7 +94,7 @@ func newRebootCmd(a *app) *cobra.Command {
 			if err := c.Reboot(cmd.Context(), powerDelay); err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(a.Stdout, "Rebooting in %d seconds.\n", powerDelay)
+			_, err = fmt.Fprintf(a.Stdout, "Reboot requested (node restarts in ~%d seconds).\n", powerDelay)
 			return err
 		},
 	}
@@ -87,10 +103,10 @@ func newRebootCmd(a *app) *cobra.Command {
 func newShutdownCmd(a *app) *cobra.Command {
 	return &cobra.Command{
 		Use:   "shutdown",
-		Short: "Power the node off in 5 seconds",
+		Short: "Ask the node to power off (it shuts down in ~5 seconds)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := confirmOrAbort(a, "Shut the node down? It stays off until powered on again."); err != nil {
+			if err := confirmOrAbort(cmd.Context(), a, "Shut the node down? It stays off until powered on again."); err != nil {
 				return err
 			}
 			c, err := a.connect(cmd)
@@ -101,7 +117,7 @@ func newShutdownCmd(a *app) *cobra.Command {
 			if err := c.Shutdown(cmd.Context(), powerDelay); err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(a.Stdout, "Shutting down in %d seconds.\n", powerDelay)
+			_, err = fmt.Fprintf(a.Stdout, "Shutdown requested (node powers off in ~%d seconds).\n", powerDelay)
 			return err
 		},
 	}
@@ -118,7 +134,7 @@ func newFactoryResetCmd(a *app) *cobra.Command {
 			if full {
 				prompt = "Fully factory reset the node? This erases its configuration and device state (including the node database and keys)."
 			}
-			if err := confirmOrAbort(a, prompt); err != nil {
+			if err := confirmOrAbort(cmd.Context(), a, prompt); err != nil {
 				return err
 			}
 			c, err := a.connect(cmd)

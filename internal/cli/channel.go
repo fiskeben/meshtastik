@@ -272,6 +272,9 @@ func newChannelURLCmd(a *app) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var newSet *pb.ChannelSet
 			if cmd.Flags().Changed("set") {
+				if channelurl.AddOnly(set) {
+					return errors.New("add-style channel URLs are not supported yet; use channel add")
+				}
 				var err error
 				if newSet, err = channelurl.Decode(set); err != nil {
 					return err
@@ -305,7 +308,7 @@ func newChannelURLCmd(a *app) *cobra.Command {
 				}
 				return nil
 			}
-			if err := confirmOrAbort(a, "Replace all channels and LoRa settings from this URL?"); err != nil {
+			if err := confirmOrAbort(cmd.Context(), a, "Replace all channels and LoRa settings from this URL?"); err != nil {
 				return err
 			}
 			changes := channelSetChanges(st.Channels, newSet)
