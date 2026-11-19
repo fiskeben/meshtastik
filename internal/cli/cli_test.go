@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 
+	"meshtastik/internal/device"
 	"meshtastik/internal/fakedevice"
 	"meshtastik/internal/transport"
 )
@@ -15,10 +17,11 @@ func runCLI(t *testing.T, d *fakedevice.Device, stdin string, args ...string) (s
 	t.Helper()
 	var out, errOut bytes.Buffer
 	root := NewRoot(Deps{
-		Dial:    func(ConnFlags) (transport.Dialer, error) { return d.Dialer(), nil },
-		Stdout:  &out,
-		Stderr:  &errOut,
-		Confirm: func(string) bool { return strings.HasPrefix(stdin, "y") },
+		Dial:          func(ConnFlags) (transport.Dialer, error) { return d.Dialer(), nil },
+		Stdout:        &out,
+		Stderr:        &errOut,
+		Confirm:       func(string) bool { return strings.HasPrefix(stdin, "y") },
+		DeviceOptions: func(o *device.Options) { o.RebootGrace = 50 * time.Millisecond },
 	})
 	root.SetArgs(args)
 	err = root.Execute()

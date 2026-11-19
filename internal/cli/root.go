@@ -35,6 +35,8 @@ type Deps struct {
 	Stdout  io.Writer
 	Stderr  io.Writer
 	Confirm func(prompt string) bool
+	// DeviceOptions, when set, adjusts the client options chosen by connect.
+	DeviceOptions func(*device.Options)
 }
 
 // DefaultDeps returns dependencies wired to the real process environment.
@@ -141,6 +143,9 @@ func (a *app) connect(cmd *cobra.Command) (*device.Client, error) {
 	if a.debug {
 		opts.Log = a.Stderr
 	}
+	if a.DeviceOptions != nil {
+		a.DeviceOptions(&opts)
+	}
 	ctx := cmd.Context()
 	if ctx == nil {
 		ctx = context.Background()
@@ -233,6 +238,7 @@ func NewRoot(d Deps) *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(), "meshtastik %s\n", version)
 		},
 	})
-	root.AddCommand(newInfoCmd(a), newNodesCmd(a))
+	root.AddCommand(newInfoCmd(a), newNodesCmd(a), newConfigCmd(a), newOwnerCmd(a),
+		newRebootCmd(a), newShutdownCmd(a), newFactoryResetCmd(a))
 	return root
 }
