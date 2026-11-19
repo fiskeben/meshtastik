@@ -278,8 +278,9 @@ func ScanBLE(ctx context.Context, d time.Duration) ([]BLEDevice, error) {
 }
 
 // connectGATT connects to addr, discovers the Meshtastic characteristics, wires
-// them into c and enables FromNum notifications. On error the device is
-// disconnected.
+// them into c and enables FromNum notifications. c's onClose disconnects the
+// device; it is set before notifications start, so a drain failure from the
+// first notification still disconnects. On error the device is disconnected.
 func connectGATT(a *bluetooth.Adapter, addr bluetooth.Address, name string, c *bleConn) (bluetooth.Device, error) {
 	svc, _ := bluetooth.ParseUUID(bleServiceUUID)
 	dev, err := a.Connect(addr, bluetooth.ConnectionParams{})
@@ -304,6 +305,7 @@ func connectGATT(a *bluetooth.Adapter, addr bluetooth.Address, name string, c *b
 		chars[cname] = cs[0]
 	}
 	c.link = &gattLink{toRadio: chars["ToRadio"], fromRadio: chars["FromRadio"]}
+	c.onClose = func() { _ = dev.Disconnect() }
 	fromNum := chars["FromNum"]
 	if err := fromNum.EnableNotifications(func([]byte) { c.notify() }); err != nil {
 		return fail(fmt.Errorf("enable FromNum notifications: %w", err))
@@ -374,7 +376,6 @@ func DialBLE(ctx context.Context, nameOrAddr string, log io.Writer) (Conn, error
 		if r.err != nil {
 			return nil, r.err
 		}
-		c.onClose = func() { _ = r.dev.Disconnect() }
 		if err := c.initialDrain(ctx); err != nil {
 			c.Close()
 			return nil, fmt.Errorf("initial read: %w", err)
@@ -383,7 +384,7 @@ func DialBLE(ctx context.Context, nameOrAddr string, log io.Writer) (Conn, error
 	case <-ctx.Done():
 		go func() { // drop a late-arriving connection
 			if r := <-resc; r.err == nil {
-				_ = r.dev.Disconnect()
+				c.Close() // onClose disconnects
 			}
 		}()
 		return nil, ctx.Err()
