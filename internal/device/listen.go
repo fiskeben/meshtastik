@@ -76,12 +76,13 @@ const shortDropLimit = 3
 //
 // If the link drops, Listen waits (Options.ReconnectDelay, doubling up to 5s
 // while links keep dropping soon after connecting), calls
-// Options.OnReconnect, and reconnects (redial and handshake, with the same
-// backoff and ReconnectTimeout as Apply); a reconnect failure is returned.
-// A node allows one TCP client at a time, so another client that reconnects
-// whenever it is kicked off would make the two take turns forever: after
-// shortDropLimit drops of links younger than Options.StableLink within
-// ReconnectTimeout, Listen gives up with an error saying so.
+// Options.OnReconnect, and reconnects (redial and handshake with backoff,
+// until ReconnectTimeout); a reconnect failure is returned. A node allows
+// one TCP client at a time, so another client that reconnects whenever it
+// is kicked off would make the two take turns forever. Listen therefore
+// gives up, with an error saying so, after shortDropLimit drops of links
+// younger than Options.StableLink within ReconnectTimeout, or after
+// shortDropLimit reconnect attempts that the node closes mid-handshake.
 func (c *Client) Listen(ctx context.Context, fn func(*pb.MeshPacket) error) error {
 	var shortDrops []time.Time // recent drops of short-lived links
 	var delay time.Duration    // wait before the next redial
@@ -119,9 +120,7 @@ func (c *Client) Listen(ctx context.Context, fn func(*pb.MeshPacket) error) erro
 			shortDrops = slices.DeleteFunc(shortDrops, func(t time.Time) bool { return now.Sub(t) > c.opts.ReconnectTimeout })
 			shortDrops = append(shortDrops, now)
 			if len(shortDrops) >= shortDropLimit {
-				return fmt.Errorf("connection dropped %d times within %s, each time soon after reconnecting — "+
-					"another client (Home Assistant, the phone app) is probably using the node's connection; "+
-					"stop it or connect over serial/BLE", len(shortDrops), c.opts.ReconnectTimeout)
+				return contestedError(len(shortDrops), c.opts.ReconnectTimeout)
 			}
 			if delay == 0 {
 				delay = c.opts.ReconnectDelay
@@ -129,10 +128,11 @@ func (c *Client) Listen(ctx context.Context, fn func(*pb.MeshPacket) error) erro
 				delay = min(delay*2, maxReconnectBackoff)
 			}
 		}
+		cause := fmt.Errorf("connection lost: %w", l.readErr)
 		if c.opts.OnReconnect != nil {
-			c.opts.OnReconnect(l.readErr, delay)
+			c.opts.OnReconnect(cause, delay)
 		} else {
-			fmt.Fprintf(c.opts.Log, "connection lost (%v); reconnecting in %s\n", l.readErr, delay)
+			fmt.Fprintf(c.opts.Log, "%v; reconnecting in %s\n", cause, delay)
 		}
 		t := time.NewTimer(delay)
 		select {

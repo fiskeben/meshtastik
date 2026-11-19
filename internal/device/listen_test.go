@@ -177,3 +177,27 @@ func TestListenStableLinkResetsDropCount(t *testing.T) {
 		t.Fatal(err, waits)
 	}
 }
+
+func TestListenGivesUpWhenKickedDuringHandshake(t *testing.T) {
+	d := fakedevice.New()
+	d.DropHandshakesFrom = 2 // every redial is closed mid-handshake
+	var causes []string
+	var waits []time.Duration
+	c, _ := open(t, d, device.Options{ReconnectDelay: 10 * time.Millisecond,
+		OnReconnect: func(cause error, wait time.Duration) {
+			causes, waits = append(causes, cause.Error()), append(waits, wait)
+		}})
+	go func() { time.Sleep(50 * time.Millisecond); d.DropLink() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	start := time.Now()
+	err := c.Listen(ctx, func(*pb.MeshPacket) error { return nil })
+	if err == nil || !strings.Contains(err.Error(), "another client") || time.Since(start) > time.Second || d.Dials() > 4 {
+		t.Fatal(err, time.Since(start), d.Dials())
+	}
+	if len(causes) != 3 || !strings.HasPrefix(causes[0], "connection lost: ") ||
+		!strings.HasPrefix(causes[1], "reconnect failed: handshake: node closed the connection") ||
+		!slices.Equal(waits, []time.Duration{10 * time.Millisecond, 10 * time.Millisecond, 20 * time.Millisecond}) {
+		t.Fatal(causes, waits)
+	}
+}

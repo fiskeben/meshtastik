@@ -56,6 +56,10 @@ type Device struct {
 	// DropAfterHandshake, when non-zero, closes each link this long after it
 	// answers want_config, like another client kicking this one off.
 	DropAfterHandshake time.Duration
+	// DropHandshakesFrom, when non-zero, closes the link instead of answering
+	// want_config on dial number DropHandshakesFrom (1-based) and later ones,
+	// like another client taking the connection mid-handshake.
+	DropHandshakesFrom int
 	// Backlog is emitted right after config_complete_id on the first
 	// handshake of the first dial, as a node hands over queued packets.
 	Backlog []*pb.MeshPacket
@@ -145,7 +149,7 @@ func (d *Device) Dialer() transport.Dialer {
 		var l *link
 		if !refuse {
 			l = newLink()
-			l.first = d.dials == 1
+			l.dial = d.dials
 			d.cur = l
 		}
 		d.mu.Unlock()
@@ -170,7 +174,7 @@ type link struct {
 	toClient chan *pb.FromRadio
 	done     chan struct{}
 	once     sync.Once
-	first    bool // made by the first Dial
+	dial     int // number of the Dial that made it, from 1
 }
 
 func newLink() *link {
@@ -268,12 +272,16 @@ func (d *Device) serve(l *link) {
 		switch v := e.m.PayloadVariant.(type) {
 		case *pb.ToRadio_WantConfigId:
 			d.mu.Lock()
+			drop := d.DropHandshakesFrom > 0 && l.dial >= d.DropHandshakesFrom
 			silent := d.Silent
-			reboot := !silent && d.handshakeReboots > 0
+			reboot := !drop && !silent && d.handshakeReboots > 0
 			if reboot {
 				d.handshakeReboots--
 			}
 			d.mu.Unlock()
+			if drop {
+				return // closes the link
+			}
 			if silent {
 				continue
 			}
@@ -287,10 +295,10 @@ func (d *Device) serve(l *link) {
 				return
 			}
 			d.mu.Lock()
-			drop := d.DropAfterHandshake
+			after := d.DropAfterHandshake
 			d.mu.Unlock()
-			if drop > 0 {
-				time.AfterFunc(drop, func() { l.close() })
+			if after > 0 {
+				time.AfterFunc(after, func() { l.close() })
 			}
 		case *pb.ToRadio_Packet:
 			if adm != nil && !d.handleAdmin(l, &st, v.Packet, adm) {
@@ -353,7 +361,7 @@ func (d *Device) handshake(l *link, nonce uint32) bool {
 		msgs = append(msgs, &pb.FromRadio{PayloadVariant: &pb.FromRadio_Channel{Channel: ch}})
 	}
 	msgs = append(msgs, &pb.FromRadio{PayloadVariant: &pb.FromRadio_ConfigCompleteId{ConfigCompleteId: nonce}})
-	if l.first && !d.backlogSent {
+	if l.dial == 1 && !d.backlogSent {
 		d.backlogSent = true
 		for _, p := range d.Backlog {
 			msgs = append(msgs, &pb.FromRadio{PayloadVariant: &pb.FromRadio_Packet{Packet: p}})

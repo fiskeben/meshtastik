@@ -75,9 +75,10 @@ type Options struct {
 
 	// Listen's handling of dropped links (see Listen).
 	StableLink     time.Duration // default 60s: a link that lived shorter counts as short-lived when it drops
-	ReconnectDelay time.Duration // default 1s: wait before redialling after a drop; doubles while links are short-lived
-	// OnReconnect, when set, is called by Listen before each reconnect after
-	// a dropped link, with the cause and the wait before redialling.
+	ReconnectDelay time.Duration // default 1s: wait before redialling after a drop; doubles while attempts fail or links are short-lived
+	// OnReconnect, when set, is called by Listen after a dropped link and
+	// after each failed reconnect attempt, with the cause and the wait
+	// before redialling.
 	OnReconnect func(cause error, wait time.Duration)
 }
 
@@ -112,9 +113,12 @@ const (
 )
 
 var (
-	errClientClosed     = errors.New("client closed")
-	errRebooted         = errors.New("node rebooted during handshake")
-	errHandshakeTimeout = errors.New("no response to handshake")
+	errClientClosed = errors.New("client closed")
+	// errDroppedInHandshake: the link closed before config_complete_id, as
+	// when another client takes the node's only TCP connection.
+	errDroppedInHandshake = errors.New("node closed the connection")
+	errRebooted           = errors.New("node rebooted during handshake")
+	errHandshakeTimeout   = errors.New("no response to handshake")
 )
 
 // link is one physical connection with its own reader and heartbeat
@@ -227,6 +231,11 @@ func Open(ctx context.Context, dial transport.Dialer, opts Options) (*Client, er
 	}
 	if err := c.handshake(ctx, l, opts.HandshakeTimeout, true); err != nil {
 		c.Close()
+		if errors.Is(err, errDroppedInHandshake) && conn.Kind() == transport.KindTCP {
+			err = fmt.Errorf("the node closed the connection during the handshake — another client (e.g. Home Assistant "+
+				"or the phone app) connected over WiFi has probably taken the node's only TCP connection; "+
+				"stop it or connect over serial/BLE (%w)", err)
+		}
 		return nil, err
 	}
 	if v := c.State().Metadata.GetFirmwareVersion(); !supported(v) {
@@ -307,7 +316,7 @@ func (c *Client) handshakeOnce(ctx context.Context, l *link, timeout time.Durati
 	case <-l.rebooted:
 		return errRebooted
 	case <-l.readerEnd:
-		return fmt.Errorf("handshake: %w", l.readErr)
+		return fmt.Errorf("handshake: %w: %w", errDroppedInHandshake, l.readErr)
 	case <-timer.C:
 		return fmt.Errorf("%w after %s on %s — %s", errHandshakeTimeout, timeout, l.conn.Kind(), hint)
 	case <-ctx.Done():
@@ -333,8 +342,19 @@ func (r reconnectReason) String() string {
 	return "after reboot"
 }
 
+// contestedError is returned once the connection has dropped drops times
+// during or soon after reconnecting.
+func contestedError(drops int, within time.Duration) error {
+	return fmt.Errorf("connection dropped %d times within %s, each time during or soon after reconnecting — "+
+		"another client (Home Assistant, the phone app) is probably using the node's connection; "+
+		"stop it or connect over serial/BLE", drops, within)
+}
+
 // reconnect replaces the current link after a reboot or a dropped link: it
 // redials with backoff and re-runs the handshake until ReconnectTimeout.
+// After a drop the backoff starts at Options.ReconnectDelay, each failed
+// attempt is reported through Options.OnReconnect, and shortDropLimit
+// attempts that the node closes mid-handshake end it with contestedError.
 func (c *Client) reconnect(ctx context.Context, after reconnectReason) error {
 	if l := c.current(); l != nil {
 		l.close()
@@ -343,10 +363,24 @@ func (c *Client) reconnect(ctx context.Context, after reconnectReason) error {
 	rctx, cancel := context.WithTimeout(ctx, c.opts.ReconnectTimeout)
 	defer cancel()
 	delay := reconnectBackoff
+	if after == afterDrop {
+		delay = c.opts.ReconnectDelay
+	}
+	dropped := 0 // attempts the node closed mid-handshake
 	for {
 		err := c.redial(rctx)
 		if err == nil || errors.Is(err, errClientClosed) {
 			return err
+		}
+		if after == afterDrop {
+			if errors.Is(err, errDroppedInHandshake) && rctx.Err() == nil {
+				if dropped++; dropped >= shortDropLimit {
+					return contestedError(dropped, c.opts.ReconnectTimeout)
+				}
+			}
+			if rctx.Err() == nil && c.opts.OnReconnect != nil {
+				c.opts.OnReconnect(fmt.Errorf("reconnect failed: %w", err), delay)
+			}
 		}
 		t := time.NewTimer(delay)
 		select {

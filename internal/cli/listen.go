@@ -220,7 +220,7 @@ func newListenCmd(a *app) *cobra.Command {
 			}
 			c, err := a.connectWith(cmd, func(o *device.Options) {
 				o.OnReconnect = func(cause error, wait time.Duration) {
-					fmt.Fprintf(a.Stderr, "connection lost (%v); reconnecting in %s\n", cause, wait)
+					fmt.Fprintf(a.Stderr, "%v; reconnecting in %s\n", cause, wait)
 				}
 			})
 			if err != nil {

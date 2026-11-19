@@ -166,7 +166,7 @@ func TestListenReportsReconnect(t *testing.T) {
 		d.Inject(text(42, 0xffffffff, "back"))
 	}()
 	out, errOut, err := runCLI(t, d, "", "listen", "--count", "1")
-	if err != nil || !strings.Contains(out, ": back") || !strings.Contains(errOut, "connection lost (") || !strings.Contains(errOut, "reconnecting in 10ms") {
+	if err != nil || !strings.Contains(out, ": back") || !strings.Contains(errOut, "connection lost: ") || !strings.Contains(errOut, "reconnecting in 10ms") {
 		t.Fatalf("%q %q %v", out, errOut, err)
 	}
 }

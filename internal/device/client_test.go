@@ -13,6 +13,7 @@ import (
 
 	"meshtastik/internal/device"
 	"meshtastik/internal/fakedevice"
+	"meshtastik/internal/transport"
 )
 
 func ctxT(t *testing.T) context.Context {
@@ -102,6 +103,23 @@ func TestOpenHandshakeCtxExpiryHasHint(t *testing.T) {
 	defer cancel()
 	_, err := device.Open(ctx, d.Dialer(), device.Options{})
 	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "no response") {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenDroppedInHandshakeHintsAtTCPClient(t *testing.T) {
+	d := fakedevice.New()
+	d.Kind = transport.KindTCP
+	d.DropHandshakesFrom = 1
+	_, err := open(t, d, device.Options{})
+	if err == nil || !strings.Contains(err.Error(), "the node closed the connection during the handshake — another client (e.g. Home Assistant") ||
+		!strings.Contains(err.Error(), "only TCP connection; stop it or connect over serial/BLE") {
+		t.Fatal(err)
+	}
+	d = fakedevice.New() // serial: no TCP advice
+	d.DropHandshakesFrom = 1
+	_, err = open(t, d, device.Options{})
+	if err == nil || !strings.Contains(err.Error(), "handshake: node closed the connection") || strings.Contains(err.Error(), "TCP") {
 		t.Fatal(err)
 	}
 }
