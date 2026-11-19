@@ -7,10 +7,12 @@ require (
 	github.com/spf13/cobra v1.10.2
 	go.bug.st/serial v1.8.0
 	google.golang.org/protobuf v1.36.12
+	sigs.k8s.io/yaml v1.6.0
 )
 
 require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
+	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	golang.org/x/sys v0.43.0 // indirect
 )

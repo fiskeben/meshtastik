@@ -5,6 +5,9 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
+
+	"meshtastik/internal/transport"
 )
 
 func TestConnFlagsMutuallyExclusive(t *testing.T) {
@@ -26,5 +29,33 @@ func TestVersion(t *testing.T) {
 	}
 	if !strings.HasPrefix(out.String(), "meshtastik ") {
 		t.Fatalf("got %q", out.String())
+	}
+}
+
+func TestChooseConn(t *testing.T) {
+	one := func() ([]transport.SerialCandidate, error) {
+		return []transport.SerialCandidate{{Path: "/dev/cu.a"}}, nil
+	}
+	two := func() ([]transport.SerialCandidate, error) {
+		return []transport.SerialCandidate{{Path: "/dev/cu.a"}, {Path: "/dev/cu.b"}}, nil
+	}
+	none := func() ([]transport.SerialCandidate, error) { return nil, nil }
+	if k, p, err := chooseConn(ConnFlags{}, one); err != nil || k != transport.KindSerial || p != "/dev/cu.a" {
+		t.Fatal(k, p, err)
+	}
+	if k, p, _ := chooseConn(ConnFlags{Host: "10.0.0.2"}, none); k != transport.KindTCP || p != "10.0.0.2" {
+		t.Fatal(k, p)
+	}
+	if _, _, err := chooseConn(ConnFlags{}, none); err == nil || !strings.Contains(err.Error(), "no Meshtastic device found") {
+		t.Fatal(err)
+	}
+	if _, _, err := chooseConn(ConnFlags{}, two); err == nil || !strings.Contains(err.Error(), "/dev/cu.b") {
+		t.Fatal(err)
+	}
+}
+
+func TestDefaultHandshakeTimeoutPerKind(t *testing.T) {
+	if defaultHandshakeTimeout(transport.KindBLE) != 30*time.Second || defaultHandshakeTimeout(transport.KindSerial) != 15*time.Second {
+		t.Fatal()
 	}
 }
