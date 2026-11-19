@@ -142,3 +142,24 @@ func TestExportRoundTrip(t *testing.T) {
 		t.Fatal("round trip lost data")
 	}
 }
+
+func TestLocationRange(t *testing.T) {
+	for y, want := range map[string]string{"location: {lat: 91, lon: 0}": "91", "location: {lat: 0, lon: -181}": "-181"} {
+		if _, err := Read([]byte(y)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatal(y, err)
+		}
+	}
+}
+
+func TestNullClearsMessageErrorsOnScalar(t *testing.T) {
+	d, _ := Read([]byte("config: {network: {ipv4Config: null}}"))
+	base := &pb.LocalConfig{Network: &pb.Config_NetworkConfig{Ipv4Config: &pb.Config_NetworkConfig_IpV4Config{Ip: 1}}}
+	got, _, err := d.MergeConfig(base, false)
+	if err != nil || got.Network.Ipv4Config != nil {
+		t.Fatal(got, err)
+	}
+	d, _ = Read([]byte("config: {lora: {hopLimit: null}}"))
+	if _, _, err := d.MergeConfig(base, false); err == nil || !strings.Contains(err.Error(), "lora.hop_limit") {
+		t.Fatal(err)
+	}
+}

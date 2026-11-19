@@ -93,8 +93,38 @@ func TestExportFileMode(t *testing.T) {
 	if _, _, err := runCLI(t, fakedevice.New(), "", "config", "export", "-o", p); err != nil {
 		t.Fatal(err)
 	}
-	if fi, _ := os.Stat(p); fi.Mode().Perm() != 0o600 {
-		t.Fatal(fi.Mode())
+	fi, _ := os.Stat(p)
+	got, _ := os.ReadFile(p)
+	if fi.Mode().Perm() != 0o600 || !strings.HasPrefix(string(got), "# start of Meshtastic configure yaml") {
+		t.Fatal(fi.Mode(), string(got))
+	}
+}
+
+func TestExportFailureLeavesNoTempFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "node.yaml")
+	if err := os.Mkdir(p, 0o755); err != nil { // rename over a directory fails
+		t.Fatal(err)
+	}
+	if _, _, err := runCLI(t, fakedevice.New(), "", "config", "export", "-o", p); err == nil {
+		t.Fatal("expected error")
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Fatal(entries)
+	}
+}
+
+func TestExportImportRoundTripIsNoOp(t *testing.T) {
+	d := fakedevice.New()
+	d.Config.Position.FixedPosition = true
+	p := filepath.Join(t.TempDir(), "rt.yaml")
+	if _, _, err := runCLI(t, d, "", "config", "export", "-o", p); err != nil {
+		t.Fatal(err)
+	}
+	out, stderr, err := runCLI(t, d, "", "config", "import", p, "--keys")
+	if err != nil || out != "No changes needed.\n" || fakedevice.CountBegin(d.Received()) != 0 {
+		t.Fatal(err, out, stderr, d.Received())
 	}
 }
 
@@ -160,5 +190,14 @@ func TestImportLocationAndChannelURL(t *testing.T) {
 	out, _, _ := runCLI(t, d, "", "config", "get", "position.fixed_position")
 	if out != "true\n" {
 		t.Fatal(out)
+	}
+	var pos *pb.Position
+	for _, m := range d.Received() {
+		if p := m.GetSetFixedPosition(); p != nil {
+			pos = p
+		}
+	}
+	if pos == nil || pos.GetLatitudeI() != 599139000 || pos.GetLongitudeI() != 107522000 || pos.GetAltitude() != 23 {
+		t.Fatal(pos)
 	}
 }

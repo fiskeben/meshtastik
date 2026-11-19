@@ -57,7 +57,11 @@ func Export(s *device.State) ([]byte, error) {
 			return nil, err
 		}
 	}
-	if u, err := channelurl.Encode(s.Channels, s.Config.GetLora()); err == nil {
+	if hasChannels(s.Channels) {
+		u, err := channelurl.Encode(s.Channels, s.Config.GetLora())
+		if err != nil {
+			return nil, err
+		}
 		if err := add("channel_url", u); err != nil {
 			return nil, err
 		}
@@ -84,6 +88,16 @@ func Export(s *device.State) ([]byte, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// hasChannels reports whether any channel is in use (Encode refuses none).
+func hasChannels(chs [8]*pb.Channel) bool {
+	for _, c := range chs {
+		if r := c.GetRole(); r == pb.Channel_PRIMARY || r == pb.Channel_SECONDARY {
+			return true
+		}
+	}
+	return false
 }
 
 // marshalSections converts a Local* message to {snake_section: {camelField: v}},
@@ -160,7 +174,13 @@ func Read(data []byte) (*Doc, error) {
 		return nil, fmt.Errorf("backup: %w", err)
 	}
 	d := &Doc{}
-	for k, v := range top {
+	keys := make([]string, 0, len(top))
+	for k := range top {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		v := top[k]
 		var err error
 		switch k {
 		case "owner":
@@ -216,15 +236,26 @@ func asLocation(v any) (*Location, error) {
 		return nil, err
 	}
 	var loc Location
-	for k, v := range m {
-		n, ok := v.(float64)
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		n, ok := m[k].(float64)
 		if !ok {
 			return nil, fmt.Errorf("backup: location.%s must be a number", k)
 		}
 		switch k {
 		case "lat":
+			if !(n >= -90 && n <= 90) {
+				return nil, fmt.Errorf("backup: location.lat %v out of range (-90..90)", n)
+			}
 			loc.Lat = n
 		case "lon":
+			if !(n >= -180 && n <= 180) {
+				return nil, fmt.Errorf("backup: location.lon %v out of range (-180..180)", n)
+			}
 			loc.Lon = n
 		case "alt":
 			loc.Alt = int32(n)
@@ -289,13 +320,12 @@ func merge(dst protoreflect.Message, sections map[string]any, withKeys bool) (sk
 		}
 		slices.Sort(keys)
 		for _, key := range keys {
-			path := sf.TextName() + "." + key
 			ff := findField(sec.Descriptor(), key)
 			if ff == nil {
 				return nil, fmt.Errorf("unknown field %q in section %q", key, name)
 			}
 			val := fieldsIn[key]
-			path = sf.TextName() + "." + ff.TextName()
+			path := sf.TextName() + "." + ff.TextName()
 			if !withKeys && sf.TextName() == "security" && (ff.TextName() == "private_key" || ff.TextName() == "public_key") {
 				if s, _ := val.(string); strings.TrimPrefix(s, base64Prefix) != "" {
 					skipped = append(skipped, path)
@@ -303,6 +333,11 @@ func merge(dst protoreflect.Message, sections map[string]any, withKeys bool) (sk
 				continue
 			}
 			if val == nil {
+				// null is what EmitUnpopulated writes for an unset nested message.
+				if ff.Message() == nil || ff.IsList() || ff.IsMap() {
+					return nil, fmt.Errorf("%s: null is only valid for a nested message", path)
+				}
+				sec.Clear(ff)
 				continue
 			}
 			stripBytes(&val, ff)

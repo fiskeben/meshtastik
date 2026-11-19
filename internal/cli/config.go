@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 
 	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
 	"github.com/spf13/cobra"
@@ -194,11 +195,7 @@ func newConfigExportCmd(a *app) *cobra.Command {
 				_, err = a.Stdout.Write(data)
 				return err
 			}
-			if err := os.WriteFile(out, data, 0o600); err != nil {
-				return err
-			}
-			// WriteFile keeps the mode of an existing file.
-			return os.Chmod(out, 0o600)
+			return writeFileAtomic(out, data)
 		},
 	}
 	cmd.Flags().StringVarP(&out, "output", "o", "", "write to this file instead of stdout")
@@ -302,4 +299,33 @@ func newConfigImportCmd(a *app) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&keys, "keys", false, "also apply security.private_key and security.public_key")
 	return cmd
+}
+
+// writeFileAtomic writes data to path with mode 0600. The temp file is created
+// 0600 in the same directory and renamed over path, so the private key in a
+// backup is never readable by others and a failure leaves no partial file.
+func writeFileAtomic(path string, data []byte) (err error) {
+	f, err := os.CreateTemp(filepath.Dir(path), ".meshtastik-export-*")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			f.Close()
+			os.Remove(f.Name())
+		}
+	}()
+	if err = f.Chmod(0o600); err != nil {
+		return err
+	}
+	if _, err = f.Write(data); err != nil {
+		return err
+	}
+	if err = f.Sync(); err != nil {
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
 }
