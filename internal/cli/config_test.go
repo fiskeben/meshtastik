@@ -59,3 +59,23 @@ func TestConfigSetMismatchFails(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestConfigGetUsesProtoNames(t *testing.T) {
+	d := fakedevice.New()
+	if out, _, _ := runCLI(t, d, "", "config", "get", "lora", "--json"); !strings.Contains(out, `"hop_limit"`) || strings.Contains(out, "hopLimit") {
+		t.Fatal(out)
+	}
+	if out, _, _ := runCLI(t, d, "", "config", "get", "lora"); !strings.Contains(out, "hop_limit:") {
+		t.Fatal(out)
+	}
+	if out, _, _ := runCLI(t, d, "", "config", "get", "--json"); !strings.Contains(out, `"hop_limit"`) {
+		t.Fatal(out)
+	}
+}
+
+func TestConfigSetNegativeAfterDashDash(t *testing.T) {
+	d := fakedevice.New()
+	if _, _, err := runCLI(t, d, "", "config", "set", "--", "lora.tx_power", "-5"); err != nil || d.Config.Lora.TxPower != -5 {
+		t.Fatal(err)
+	}
+}

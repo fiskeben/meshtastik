@@ -63,3 +63,21 @@ func TestFactoryResetConfirm(t *testing.T) {
 		t.Fatal("full reset not sent")
 	}
 }
+
+func TestOwnerSetKeepsOtherFields(t *testing.T) {
+	d := fakedevice.New()
+	d.Owner.IsLicensed = true
+	if _, _, err := runCLI(t, d, "", "owner", "set", "Renamed"); err != nil || !d.Owner.IsLicensed {
+		t.Fatal(err, d.Owner)
+	}
+}
+
+func TestOwnerSetRejectsEmpty(t *testing.T) {
+	d := fakedevice.New()
+	if _, _, err := runCLI(t, d, "", "owner", "set", ""); err == nil {
+		t.Fatal("empty long name accepted")
+	}
+	if _, _, err := runCLI(t, d, "", "owner", "set", "X", "--short", ""); err == nil {
+		t.Fatal("empty short name accepted")
+	}
+}

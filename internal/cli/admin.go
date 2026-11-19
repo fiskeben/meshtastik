@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 
 	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/proto"
 
 	"meshtastik/internal/device"
 )
@@ -27,7 +29,13 @@ func newOwnerCmd(a *app) *cobra.Command {
 			if len(long) > maxLongName {
 				return fmt.Errorf("long name is %d bytes; the limit is %d bytes", len(long), maxLongName)
 			}
+			if long == "" {
+				return errors.New("long name must not be empty")
+			}
 			shortSet := cmd.Flags().Changed("short")
+			if shortSet && short == "" {
+				return errors.New("short name must not be empty")
+			}
 			if shortSet && len(short) > maxShortName {
 				return fmt.Errorf("short name is %d bytes; the limit is %d bytes", len(short), maxShortName)
 			}
@@ -36,10 +44,19 @@ func newOwnerCmd(a *app) *cobra.Command {
 				return err
 			}
 			defer c.Close()
-			if !shortSet {
-				short = c.State().Self().GetUser().GetShortName()
+			self := c.State().Self().GetUser()
+			if self == nil && !shortSet {
+				return errors.New("the node did not report its current owner; pass --short")
 			}
-			return applyChanges(cmd, a, c, []device.Change{{Owner: &pb.User{LongName: long, ShortName: short}}})
+			u := &pb.User{}
+			if self != nil {
+				u = proto.Clone(self).(*pb.User)
+			}
+			u.LongName = long
+			if shortSet {
+				u.ShortName = short
+			}
+			return applyChanges(cmd, a, c, []device.Change{{Owner: u}})
 		},
 	}
 	set.Flags().StringVar(&short, "short", "", "short name (up to 4 bytes); kept unchanged if omitted")

@@ -155,7 +155,7 @@ func (a *app) connect(cmd *cobra.Command) (*device.Client, error) {
 
 // printProto writes m as YAML, or as indented JSON when asJSON is set.
 func printProto(w io.Writer, m proto.Message, asJSON bool) error {
-	raw, err := protojson.MarshalOptions{Indent: "  "}.Marshal(m)
+	raw, err := protojson.MarshalOptions{Indent: "  ", UseProtoNames: true}.Marshal(m)
 	if err != nil {
 		return err
 	}

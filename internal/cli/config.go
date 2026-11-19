@@ -67,7 +67,7 @@ func newConfigGetCmd(a *app) *cobra.Command {
 }
 
 func printAllConfig(a *app, st *device.State) error {
-	mo := protojson.MarshalOptions{}
+	mo := protojson.MarshalOptions{UseProtoNames: true}
 	cfg, err := mo.Marshal(st.Config)
 	if err != nil {
 		return err
@@ -100,6 +100,8 @@ func newConfigSetCmd(a *app) *cobra.Command {
 	return &cobra.Command{
 		Use:   "set <path> <value> [<path> <value>...]",
 		Short: "Set one or more config fields in a single verified edit",
+		Example: "  meshtastik config set lora.hop_limit 5 lora.tx_power 20\n" +
+			"  meshtastik config set -- lora.tx_power -5   # negative values need --",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 || len(args)%2 != 0 {
 				return errors.New("expected <path> <value> pairs")
