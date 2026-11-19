@@ -67,3 +67,32 @@ func TestSendBadChannel(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSendToBroadcastAddress(t *testing.T) {
+	for _, to := range []string{"!ffffffff", "4294967295"} {
+		d := fakedevice.New()
+		out, _, err := runCLI(t, d, "", "send", "hi", "--to", to)
+		if err != nil || !strings.Contains(out, "Sent.") || strings.Contains(out, "Acknowledged") || d.Texts()[0].WantAck {
+			t.Errorf("%s: %q %v", to, out, err)
+		}
+	}
+}
+
+func TestSendImplicitOnly(t *testing.T) {
+	d := fakedevice.New()
+	d.ImplicitAckTexts = true
+	_, _, err := runCLI(t, d, "", "send", "hi", "--to", "!0000002a", "--ack-timeout", "100ms")
+	if err == nil || !strings.Contains(err.Error(), "no acknowledgement") || !strings.Contains(err.Error(), "relayed") {
+		t.Fatal(err)
+	}
+}
+
+func TestSendRejects(t *testing.T) {
+	for _, args := range [][]string{
+		{"--to", "!1234abcd"}, {"--to", "0"}, {"--ack-timeout", "0s", "--to", "42"},
+	} {
+		if _, _, err := runCLI(t, fakedevice.New(), "", append([]string{"send", "hi"}, args...)...); err == nil {
+			t.Errorf("%v accepted", args)
+		}
+	}
+}

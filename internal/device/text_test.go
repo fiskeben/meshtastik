@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
+
 	"meshtastik/internal/fakedevice"
 )
 
@@ -58,5 +60,73 @@ func TestSendTextTooLong(t *testing.T) {
 	err := c.SendText(context.Background(), strings.Repeat("é", 117), Broadcast, 0, false) // 234 bytes
 	if err == nil || !strings.Contains(err.Error(), "233") {
 		t.Fatal(err)
+	}
+}
+
+func sendAsync(c *Client, ctx context.Context) <-chan error {
+	ch := make(chan error, 1)
+	go func() { ch <- c.SendText(ctx, "hi", 42, 0, true) }()
+	return ch
+}
+
+func TestSendTextImplicitOnly(t *testing.T) {
+	d := fakedevice.New()
+	d.ImplicitAckTexts = true
+	c := openFake(t, d)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	err := c.SendText(ctx, "hi", 42, 0, true)
+	if !errors.Is(err, ErrNoAck) || !errors.Is(err, ErrImplicitAck) || !strings.Contains(err.Error(), "implicit") {
+		t.Fatal(err)
+	}
+}
+
+func TestSendTextImplicitThenAck(t *testing.T) {
+	d := fakedevice.New()
+	d.ImplicitAckTexts, d.AckTexts = true, true
+	c := openFake(t, d)
+	if err := c.SendText(context.Background(), "hi", 42, 0, true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSendTextDeliveryFailed(t *testing.T) {
+	d := fakedevice.New()
+	d.AckTexts, d.AckError = true, pb.Routing_NO_RESPONSE
+	c := openFake(t, d)
+	err := c.SendText(context.Background(), "hi", 42, 0, true)
+	if err == nil || !strings.Contains(err.Error(), "delivery failed: NO_RESPONSE") {
+		t.Fatal(err)
+	}
+}
+
+func TestSendTextIgnoresOtherRequestID(t *testing.T) {
+	c := openFake(t, fakedevice.New())
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	res := sendAsync(c, ctx)
+	ack := &pb.MeshPacket{From: 42, PayloadVariant: &pb.MeshPacket_Decoded{Decoded: &pb.Data{Portnum: pb.PortNum_ROUTING_APP}}}
+	var id uint32
+	for id == 0 {
+		c.wmu.Lock()
+		for k := range c.waiters {
+			id = k
+		}
+		c.wmu.Unlock()
+		time.Sleep(time.Millisecond)
+	}
+	c.deliver(id+1, ack)
+	if err := <-res; !errors.Is(err, ErrNoAck) {
+		t.Fatal(err)
+	}
+}
+
+func TestSendTextRejectsSelfAndZero(t *testing.T) {
+	d := fakedevice.New()
+	c := openFake(t, d)
+	for _, to := range []uint32{0, d.NodeNum} {
+		if err := c.SendText(context.Background(), "hi", to, 0, true); err == nil {
+			t.Errorf("to %x accepted", to)
+		}
 	}
 }

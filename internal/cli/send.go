@@ -64,6 +64,9 @@ func newSendCmd(a *app) *cobra.Command {
 		Short: "Send a text message to the mesh",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if ackTimeout <= 0 {
+				return errors.New("--ack-timeout must be greater than 0")
+			}
 			if channel < 0 || channel > 7 {
 				return fmt.Errorf("channel %d out of range 0-7", channel)
 			}
@@ -88,7 +91,7 @@ func newSendCmd(a *app) *cobra.Command {
 			if ctx == nil {
 				ctx = context.Background()
 			}
-			direct := to != ""
+			direct := dest != device.Broadcast
 			if direct {
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithTimeout(ctx, ackTimeout)
@@ -96,7 +99,11 @@ func newSendCmd(a *app) *cobra.Command {
 			}
 			if err := c.SendText(ctx, args[0], dest, uint32(channel), direct); err != nil {
 				if errors.Is(err, device.ErrNoAck) {
-					return fmt.Errorf("%w from %s within %s", device.ErrNoAck, label, ackTimeout)
+					msg := fmt.Sprintf("no acknowledgement from %s within %s", label, ackTimeout)
+					if errors.Is(err, device.ErrImplicitAck) {
+						msg += " (the message was relayed by the mesh, but delivery is unconfirmed)"
+					}
+					return errors.New(msg)
 				}
 				return err
 			}

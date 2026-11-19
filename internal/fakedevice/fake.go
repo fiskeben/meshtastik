@@ -29,7 +29,11 @@ type Device struct {
 	ExtraNodes      []*pb.NodeInfo
 	Silent          bool // never answer want_config
 	StaleCompleteID bool // send one config_complete_id with a wrong nonce first
-	AckTexts        bool // answer a direct text message with a ROUTING_APP ack
+	AckTexts        bool // answer a direct text message with a ROUTING_APP ack from the destination
+	// ImplicitAckTexts: answer a direct text message with a NONE ROUTING_APP
+	// reply from the local node, as firmware does when it hears a rebroadcast.
+	ImplicitAckTexts bool
+	AckError         pb.Routing_Error // error_reason of the AckTexts reply (default NONE)
 
 	RequirePasskey bool     // ignore non-get admin messages without the session passkey
 	IgnoreFields   []string // config paths whose new value is silently dropped when applied
@@ -346,21 +350,27 @@ func (d *Device) Texts() []*pb.MeshPacket {
 	return out
 }
 
-// ackText answers a direct text packet with a ROUTING_APP ack when AckTexts
-// is set; false when the link is gone.
+// ackText answers a direct text packet as configured by ImplicitAckTexts
+// and AckTexts; false when the link is gone.
 func (d *Device) ackText(l *link, p *pb.MeshPacket) bool {
 	d.mu.Lock()
-	ack, num := d.AckTexts, d.NodeNum
+	ack, implicit, reason, num := d.AckTexts, d.ImplicitAckTexts, d.AckError, d.NodeNum
 	d.mu.Unlock()
-	if !ack || p.GetTo() == 0xffffffff {
+	if p.GetTo() == 0xffffffff {
 		return true
 	}
-	payload, err := proto.Marshal(&pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: pb.Routing_NONE}})
-	if err != nil {
-		panic(err)
+	reply := func(from uint32, reason pb.Routing_Error) bool {
+		payload, err := proto.Marshal(&pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: reason}})
+		if err != nil {
+			panic(err)
+		}
+		pkt := &pb.MeshPacket{From: from, To: num, PayloadVariant: &pb.MeshPacket_Decoded{Decoded: &pb.Data{
+			Portnum: pb.PortNum_ROUTING_APP, Payload: payload, RequestId: p.GetId(),
+		}}}
+		return l.emit(&pb.FromRadio{PayloadVariant: &pb.FromRadio_Packet{Packet: pkt}})
 	}
-	pkt := &pb.MeshPacket{From: p.GetTo(), To: num, PayloadVariant: &pb.MeshPacket_Decoded{Decoded: &pb.Data{
-		Portnum: pb.PortNum_ROUTING_APP, Payload: payload, RequestId: p.GetId(),
-	}}}
-	return l.emit(&pb.FromRadio{PayloadVariant: &pb.FromRadio_Packet{Packet: pkt}})
+	if implicit && !reply(num, pb.Routing_NONE) {
+		return false
+	}
+	return !ack || reply(p.GetTo(), reason)
 }

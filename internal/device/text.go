@@ -16,12 +16,24 @@ const Broadcast = 0xffffffff
 // before the context deadline.
 var ErrNoAck = errors.New("no acknowledgement")
 
+// ErrImplicitAck accompanies ErrNoAck when the local node reported hearing a
+// neighbour rebroadcast the message (an "implicit ack") but the destination
+// never confirmed delivery.
+var ErrImplicitAck = errors.New("relayed by the mesh (implicit ack) but not confirmed")
+
 // SendText sends text to node to on channel. A direct message (to !=
 // Broadcast) asks for an ack; with waitAck SendText waits for the mesh's
 // routing reply, returning ErrNoAck when ctx's deadline passes first.
 func (c *Client) SendText(ctx context.Context, text string, to uint32, channel uint32, waitAck bool) error {
 	if n := len([]byte(text)); n > int(pb.Constants_DATA_PAYLOAD_LEN) {
 		return fmt.Errorf("text is %d bytes; the limit is %d", n, int(pb.Constants_DATA_PAYLOAD_LEN))
+	}
+	if to == 0 {
+		return errors.New("0 is not a valid node")
+	}
+	me := c.State().MyInfo.GetMyNodeNum()
+	if to == me {
+		return errors.New("cannot send a message to the connected node itself")
 	}
 	id := randomID()
 	direct := to != Broadcast
@@ -42,11 +54,15 @@ func (c *Client) SendText(ctx context.Context, text string, to uint32, channel u
 		}},
 	}
 	if err := c.send(ctx, &pb.ToRadio{PayloadVariant: &pb.ToRadio_Packet{Packet: pkt}}); err != nil {
-		return c.ackErr(ctx, err)
+		if responses != nil {
+			err = ackErr(ctx, err)
+		}
+		return err
 	}
 	if responses == nil {
 		return nil
 	}
+	implicit := false
 	for {
 		select {
 		case p := <-responses:
@@ -61,17 +77,26 @@ func (c *Client) SendText(ctx context.Context, text string, to uint32, channel u
 			if r.GetErrorReason() != pb.Routing_NONE {
 				return fmt.Errorf("delivery failed: %s", r.GetErrorReason())
 			}
-			return nil
+			if p.GetFrom() == to {
+				return nil
+			}
+			// A NONE reply from anyone else, normally the local node, only says
+			// a neighbour rebroadcast the packet; keep waiting for the real ack.
+			implicit = true
 		case <-l.readerEnd:
 			return fmt.Errorf("send text: %w", l.readErr)
 		case <-ctx.Done():
-			return c.ackErr(ctx, ctx.Err())
+			err := ackErr(ctx, ctx.Err())
+			if implicit && errors.Is(err, ErrNoAck) {
+				err = fmt.Errorf("%w: %w", err, ErrImplicitAck)
+			}
+			return err
 		}
 	}
 }
 
 // ackErr maps a deadline expiry to ErrNoAck.
-func (c *Client) ackErr(ctx context.Context, err error) error {
+func ackErr(ctx context.Context, err error) error {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return ErrNoAck
 	}
