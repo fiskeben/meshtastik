@@ -239,6 +239,6 @@ func NewRoot(d Deps) *cobra.Command {
 		},
 	})
 	root.AddCommand(newInfoCmd(a), newNodesCmd(a), newConfigCmd(a), newOwnerCmd(a),
-		newRebootCmd(a), newShutdownCmd(a), newFactoryResetCmd(a))
+		newRebootCmd(a), newShutdownCmd(a), newFactoryResetCmd(a), newChannelCmd(a))
 	return root
 }
