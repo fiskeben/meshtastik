@@ -1,0 +1,32 @@
+# start of Meshtastic configure yaml
+owner: Base Station
+owner_short: BASE
+channel_url: '{{URL}}'
+location:
+  lat: 59.9139
+  lon: 10.7522
+  alt: 23
+canned_messages: Hi|Bye
+config:
+  bluetooth:
+    enabled: false
+    fixedPin: 123456
+  device:
+    role: ROUTER
+  lora:
+    hopLimit: 5
+    region: EU_868
+    txEnabled: true
+    usePreset: true
+  security:
+    adminKey:
+    - base64:AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=
+    privateKey: base64:ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=
+    publicKey: base64:QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8=
+    serialEnabled: true
+module_config:
+  mqtt:
+    enabled: false
+    encryptionEnabled: true
+  telemetry:
+    deviceUpdateInterval: 900

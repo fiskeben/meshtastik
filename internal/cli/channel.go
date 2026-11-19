@@ -250,6 +250,18 @@ func sameChannel(x, y *pb.Channel) bool {
 	return x.GetRole() == y.GetRole() && proto.Equal(sx, sy)
 }
 
+// channelSetChanges lays set out over all 8 slots and returns a Change for
+// every slot that differs from cur.
+func channelSetChanges(cur [8]*pb.Channel, set *pb.ChannelSet) []device.Change {
+	var changes []device.Change
+	for i, ch := range channelurl.ToChannels(set) {
+		if !sameChannel(ch, cur[i]) {
+			changes = append(changes, device.Change{Channel: ch})
+		}
+	}
+	return changes
+}
+
 func newChannelURLCmd(a *app) *cobra.Command {
 	var set string
 	var noQR bool
@@ -296,12 +308,7 @@ func newChannelURLCmd(a *app) *cobra.Command {
 			if err := confirmOrAbort(a, "Replace all channels and LoRa settings from this URL?"); err != nil {
 				return err
 			}
-			var changes []device.Change
-			for i, ch := range channelurl.ToChannels(newSet) {
-				if !sameChannel(ch, st.Channels[i]) {
-					changes = append(changes, device.Change{Channel: ch})
-				}
-			}
+			changes := channelSetChanges(st.Channels, newSet)
 			if newSet.LoraConfig != nil {
 				changes = append(changes, device.Change{Config: &pb.Config{
 					PayloadVariant: &pb.Config_Lora{Lora: newSet.LoraConfig},
