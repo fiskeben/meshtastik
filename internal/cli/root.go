@@ -155,7 +155,7 @@ func (a *app) connectWith(cmd *cobra.Command, backlog bool, adjust func(*device.
 			return nil, fmt.Errorf("--%s must not be empty", name)
 		}
 	}
-	opts := device.Options{HandshakeTimeout: a.timeout}
+	opts := device.Options{HandshakeTimeout: a.timeout, MeshTimeout: a.timeout}
 	if opts.HandshakeTimeout == 0 {
 		opts.HandshakeTimeout = defaultHandshakeTimeout(kindOf(a.conn))
 	}
@@ -266,7 +266,7 @@ func NewRoot(d Deps) *cobra.Command {
 	pf.BoolVar(&a.yes, "yes", false, "skip confirmations")
 	pf.BoolVar(&a.debug, "debug", false, "debug logging")
 	pf.BoolVar(&a.noDaemon, "no-daemon", false, "connect to the node directly instead of through the background daemon (also MESHTASTIK_NO_DAEMON=1)")
-	pf.DurationVar(&a.timeout, "timeout", 0, "timeout that bounds the handshake and each request, not the whole operation (0 = per-transport default)")
+	pf.DurationVar(&a.timeout, "timeout", 0, "timeout that bounds the handshake and each request, not the whole operation (0 = per-transport default; 30s per answer over the mesh)")
 
 	root.AddCommand(&cobra.Command{
 		Use:   "version",
@@ -277,6 +277,7 @@ func NewRoot(d Deps) *cobra.Command {
 		},
 	})
 	root.AddCommand(newInfoCmd(a), newNodesCmd(a), newConfigCmd(a), newOwnerCmd(a),
-		newRebootCmd(a), newShutdownCmd(a), newFactoryResetCmd(a), newChannelCmd(a), newBLECmd(a), newSendCmd(a), newListenCmd(a), newDaemonCmd(a))
+		newRebootCmd(a), newShutdownCmd(a), newFactoryResetCmd(a), newChannelCmd(a), newBLECmd(a), newSendCmd(a), newListenCmd(a), newDaemonCmd(a),
+		newTracerouteCmd(a), newRequestCmd(a))
 	return root
 }

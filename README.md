@@ -77,6 +77,9 @@ Commands connect to the node through a background daemon. The first command star
 | `factory-reset [--full]` | Erase the node's configuration (`--full` also erases device state) |
 | `send <text> [--to node] [--channel n] [--ack-timeout d]` | Send a text message; `--to` takes a `!hex` id, number or name (default: broadcast) |
 | `listen [-f] [--channel n] [--json [--raw]] [--all] [--count n]` | Print the next received message and exit; `-f`/`--follow` keeps printing (the node's queued backlog, then new ones) until Ctrl-C; `--all` adds other packet types, `--count` exits after n messages, `--raw` adds the whole FromRadio message to each JSON line under `raw` |
+| `traceroute <node> [--hop-limit n]` | Trace the route to a node and back with the SNR of each hop (default hop limit: the node's `lora.hop_limit`) |
+| `request position <node>` | Ask a node for its position |
+| `request telemetry <node> [--type device\|environment\|power\|local-stats]` | Ask a node for its telemetry |
 | `ble scan [--duration d]` | Scan for nearby Meshtastic devices over BLE (directly, never through the daemon) |
 | `daemon status` | Show whether the daemon runs, its socket and log, and the node connections it holds |
 | `daemon start [--idle-timeout d]` | Start the daemon in the background unless it is running (it also starts on demand) |
@@ -97,6 +100,7 @@ Run `meshtastik <command> --help` for details.
 - A node with `security.is_managed` set ignores local configuration, so meshtastik refuses changes to it, except turning `security.is_managed` off.
 - Changes that could cut the link in use (Bluetooth off or WiFi on over BLE, WiFi/network changes over TCP, the serial console off or taken over by the serial module over serial) ask for confirmation first.
 - `listen` has no history beyond what the daemon has kept: it shows the messages that arrived while no `listen` was running (or, with `--no-daemon`, the few the node queued while no client was connected), then live traffic. The node hands each message to one connected client only, so if Home Assistant or the phone app is connected at the same time they split the traffic. If the connection keeps dropping soon after each reconnect (another client taking the node's one TCP slot), `listen` gives up with an error.
+- `traceroute` and `request` make one attempt and wait for the answer: 30 seconds for `request`, 60 for `traceroute` (`--timeout` sets the per-answer wait; traceroute waits twice that). The firmware rate-limits traceroutes.
 - Ctrl-C during a change: before the commit, meshtastik reports that the node may hold a partial edit (firmware 2.8 and newer saves the partial edit after 60 seconds; older firmware discards it on reboot); after the commit, it reports that the changes were committed but could not be verified. A second Ctrl-C exits at once.
 
 ## Bluetooth
