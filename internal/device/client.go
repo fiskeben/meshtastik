@@ -205,7 +205,7 @@ type Client struct {
 	wmu     sync.Mutex
 	waiters map[uint32]chan *pb.MeshPacket // by request id
 
-	packets packetQueue // every MeshPacket received, across reconnects
+	packets packetQueue // every MeshPacket received, across reconnects, in its FromRadio
 
 	applyMu   sync.Mutex // serialises Apply and Listen's reconnects
 	closeOnce sync.Once
@@ -475,7 +475,7 @@ func (c *Client) dispatch(l *link, m *pb.FromRadio) {
 				}
 			})
 		}
-		c.packets.push(p)
+		c.packets.push(m)
 	default:
 		fmt.Fprintf(c.opts.Log, "ignoring %T\n", m.PayloadVariant)
 	}

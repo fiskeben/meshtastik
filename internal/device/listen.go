@@ -14,17 +14,18 @@ import (
 // full the oldest packet is dropped.
 const packetBuffer = 256
 
-// packetQueue is a bounded FIFO of received packets. push never blocks, so
-// the reader goroutine is never held up by a slow or absent listener.
+// packetQueue is a bounded FIFO of received packets, each kept in the
+// FromRadio message that carried it. push never blocks, so the reader
+// goroutine is never held up by a slow or absent listener.
 type packetQueue struct {
 	mu      sync.Mutex
-	buf     [packetBuffer]*pb.MeshPacket
+	buf     [packetBuffer]*pb.FromRadio
 	head, n int
 	dropped int
 	wake    chan struct{} // holds one pending wake-up for Listen
 }
 
-func (q *packetQueue) push(p *pb.MeshPacket) {
+func (q *packetQueue) push(m *pb.FromRadio) {
 	q.mu.Lock()
 	if q.n == len(q.buf) {
 		q.buf[q.head] = nil
@@ -32,7 +33,7 @@ func (q *packetQueue) push(p *pb.MeshPacket) {
 		q.n--
 		q.dropped++
 	}
-	q.buf[(q.head+q.n)%len(q.buf)] = p
+	q.buf[(q.head+q.n)%len(q.buf)] = m
 	q.n++
 	q.mu.Unlock()
 	select {
@@ -41,8 +42,8 @@ func (q *packetQueue) push(p *pb.MeshPacket) {
 	}
 }
 
-// pop removes and returns the oldest packet, or nil when empty.
-func (q *packetQueue) pop() *pb.MeshPacket {
+// pop removes and returns the oldest message, or nil when empty.
+func (q *packetQueue) pop() *pb.FromRadio {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.n == 0 {
@@ -68,8 +69,8 @@ func (c *Client) DroppedPackets() int {
 // Options.StableLink) within ReconnectTimeout make Listen give up.
 const shortDropLimit = 3
 
-// Listen calls fn for each buffered packet (oldest first), then for each new
-// packet, until ctx ends (returns nil) or fn returns an error (returned as
+// Listen calls fn with the FromRadio message of each buffered packet (oldest
+// first), then of each new packet, until ctx ends (returns nil) or fn returns an error (returned as
 // is). Packets are buffered from the start of the first handshake, so the
 // backlog the node sends right after connecting is not lost. Run at most one
 // Listen at a time per Client.
@@ -83,7 +84,7 @@ const shortDropLimit = 3
 // gives up, with an error saying so, after shortDropLimit drops of links
 // younger than Options.StableLink within ReconnectTimeout, or after
 // shortDropLimit reconnect attempts that the node closes mid-handshake.
-func (c *Client) Listen(ctx context.Context, fn func(*pb.MeshPacket) error) error {
+func (c *Client) Listen(ctx context.Context, fn func(*pb.FromRadio) error) error {
 	var shortDrops []time.Time // recent drops of short-lived links
 	var delay time.Duration    // wait before the next redial
 	for {
@@ -92,11 +93,11 @@ func (c *Client) Listen(ctx context.Context, fn func(*pb.MeshPacket) error) erro
 			if ctx.Err() != nil {
 				return nil
 			}
-			p := c.packets.pop()
-			if p == nil {
+			m := c.packets.pop()
+			if m == nil {
 				break
 			}
-			if err := fn(p); err != nil {
+			if err := fn(m); err != nil {
 				return err
 			}
 		}

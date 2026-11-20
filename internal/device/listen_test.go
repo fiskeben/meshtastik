@@ -28,7 +28,8 @@ func TestListenDeliversBacklogThenLive(t *testing.T) {
 	defer cancel()
 	var got []string
 	go func() { time.Sleep(50 * time.Millisecond); d.Inject(text(42, device.Broadcast, "new")) }()
-	err := c.Listen(ctx, func(p *pb.MeshPacket) error {
+	err := c.Listen(ctx, func(m *pb.FromRadio) error {
+		p := m.GetPacket()
 		got = append(got, string(p.GetDecoded().GetPayload()))
 		if len(got) == 2 {
 			cancel()
@@ -53,7 +54,8 @@ func TestListenBufferBounded(t *testing.T) {
 	defer cancel()
 	var first string
 	n := 0
-	err := c.Listen(ctx, func(p *pb.MeshPacket) error {
+	err := c.Listen(ctx, func(m *pb.FromRadio) error {
+		p := m.GetPacket()
 		if n == 0 {
 			first = string(p.GetDecoded().GetPayload())
 		}
@@ -73,7 +75,7 @@ func TestListenReturnsCallbackError(t *testing.T) {
 	d.Backlog = []*pb.MeshPacket{text(42, device.Broadcast, "old")}
 	c, _ := open(t, d, device.Options{})
 	want := fmt.Errorf("stop")
-	if err := c.Listen(ctxT(t), func(*pb.MeshPacket) error { return want }); err != want {
+	if err := c.Listen(ctxT(t), func(*pb.FromRadio) error { return want }); err != want {
 		t.Fatal(err)
 	}
 }
@@ -96,7 +98,8 @@ func TestListenReconnectsAfterDrop(t *testing.T) {
 		d.Inject(text(42, device.Broadcast, "after"))
 	}()
 	var got []string
-	err := c.Listen(ctx, func(p *pb.MeshPacket) error {
+	err := c.Listen(ctx, func(m *pb.FromRadio) error {
+		p := m.GetPacket()
 		got = append(got, string(p.GetDecoded().GetPayload()))
 		if got[len(got)-1] == "after" {
 			cancel()
@@ -115,7 +118,7 @@ func TestListenGivesUpWhenNodeGone(t *testing.T) {
 	go func() { time.Sleep(50 * time.Millisecond); d.DropLink() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	err := c.Listen(ctx, func(*pb.MeshPacket) error { return nil })
+	err := c.Listen(ctx, func(*pb.FromRadio) error { return nil })
 	if err == nil || !strings.Contains(err.Error(), "did not come back") || ctx.Err() != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +131,7 @@ func TestListenKeepsHandshakeHintAfterDrop(t *testing.T) {
 	go func() { time.Sleep(50 * time.Millisecond); d.DropLink() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	err := c.Listen(ctx, func(*pb.MeshPacket) error { return nil })
+	err := c.Listen(ctx, func(*pb.FromRadio) error { return nil })
 	if err == nil || !strings.Contains(err.Error(), "did not come back after the connection dropped") || !strings.Contains(err.Error(), "another program") {
 		t.Fatal(err)
 	}
@@ -142,7 +145,7 @@ func TestListenGivesUpWhenKickedRepeatedly(t *testing.T) {
 		OnReconnect: func(_ error, wait time.Duration) { waits = append(waits, wait) }})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	err := c.Listen(ctx, func(*pb.MeshPacket) error { return nil })
+	err := c.Listen(ctx, func(*pb.FromRadio) error { return nil })
 	if err == nil || !strings.Contains(err.Error(), "another client") || ctx.Err() != nil || d.Dials() > 4 {
 		t.Fatal(err, d.Dials())
 	}
@@ -172,7 +175,7 @@ func TestListenStableLinkResetsDropCount(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		d.Inject(text(42, device.Broadcast, "still here"))
 	}()
-	err := c.Listen(ctx, func(*pb.MeshPacket) error { cancel(); return nil })
+	err := c.Listen(ctx, func(*pb.FromRadio) error { cancel(); return nil })
 	if err != nil || len(waits) != 4 || slices.ContainsFunc(waits, func(w time.Duration) bool { return w != 10*time.Millisecond }) {
 		t.Fatal(err, waits)
 	}
@@ -191,7 +194,7 @@ func TestListenGivesUpWhenKickedDuringHandshake(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	start := time.Now()
-	err := c.Listen(ctx, func(*pb.MeshPacket) error { return nil })
+	err := c.Listen(ctx, func(*pb.FromRadio) error { return nil })
 	if err == nil || !strings.Contains(err.Error(), "another client") || time.Since(start) > time.Second || d.Dials() > 4 {
 		t.Fatal(err, time.Since(start), d.Dials())
 	}

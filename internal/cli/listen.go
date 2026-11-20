@@ -85,16 +85,17 @@ func packetTime(p *pb.MeshPacket, now time.Time) time.Time {
 }
 
 type listenJSON struct {
-	Time      string  `json:"time"`
-	From      string  `json:"from"`
-	FromName  string  `json:"from_name"`
-	To        string  `json:"to"`
-	Channel   uint32  `json:"channel"`
-	Port      string  `json:"port,omitempty"`
-	Text      *string `json:"text,omitempty"`
-	SNR       float32 `json:"snr"`
-	RSSI      int32   `json:"rssi"`
-	Encrypted bool    `json:"encrypted,omitempty"`
+	Time      string          `json:"time"`
+	From      string          `json:"from"`
+	FromName  string          `json:"from_name"`
+	To        string          `json:"to"`
+	Channel   uint32          `json:"channel"`
+	Port      string          `json:"port,omitempty"`
+	Text      *string         `json:"text,omitempty"`
+	SNR       float32         `json:"snr"`
+	RSSI      int32           `json:"rssi"`
+	Encrypted bool            `json:"encrypted,omitempty"`
+	Raw       json.RawMessage `json:"raw,omitempty"`
 }
 
 // encrypted reports whether p arrived undecoded (the node lacked its key).
@@ -103,7 +104,9 @@ func encrypted(p *pb.MeshPacket) bool {
 	return ok
 }
 
-func writeListenJSON(w io.Writer, s *device.State, p *pb.MeshPacket, now time.Time) error {
+// writeListenJSON prints p as one line of JSON. When raw is set, the whole
+// FromRadio message is included under "raw".
+func writeListenJSON(w io.Writer, s *device.State, p *pb.MeshPacket, raw *pb.FromRadio, now time.Time) error {
 	d := p.GetDecoded()
 	m := listenJSON{
 		Time:      packetTime(p, now).UTC().Format(time.RFC3339),
@@ -124,6 +127,17 @@ func writeListenJSON(w io.Writer, s *device.State, p *pb.MeshPacket, now time.Ti
 	if d.GetPortnum() == pb.PortNum_TEXT_MESSAGE_APP {
 		t := strings.ToValidUTF8(string(d.GetPayload()), "\uFFFD")
 		m.Text = &t
+	}
+	if raw != nil {
+		b, err := protoOutput.Marshal(raw)
+		if err != nil {
+			return err
+		}
+		var c bytes.Buffer // one line: protojson may add spaces at random
+		if err := json.Compact(&c, b); err != nil {
+			return err
+		}
+		m.Raw = c.Bytes()
 	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -202,10 +216,10 @@ func pad(s string, n int) string {
 
 func newListenCmd(a *app) *cobra.Command {
 	var channel, count int
-	var all bool
+	var all, follow, raw bool
 	cmd := &cobra.Command{
 		Use:   "listen",
-		Short: "Print received messages: the node's backlog, then new ones until Ctrl-C",
+		Short: "Print the next received message, or with -f the node's backlog and then new ones until Ctrl-C",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			f := listenFilter{all: all, channel: -1}
@@ -217,6 +231,12 @@ func newListenCmd(a *app) *cobra.Command {
 			}
 			if cmd.Flags().Changed("count") && count < 1 {
 				return errors.New("--count must be at least 1")
+			}
+			if raw && !a.asJSON {
+				return errors.New("--raw requires --json")
+			}
+			if !follow && !cmd.Flags().Changed("count") {
+				count = 1
 			}
 			c, err := a.connectWith(cmd, func(o *device.Options) {
 				o.OnReconnect = func(cause error, wait time.Duration) {
@@ -235,7 +255,8 @@ func newListenCmd(a *app) *cobra.Command {
 			fmt.Fprintf(a.Stderr, "Listening on %s — Ctrl-C to stop\n", nodeName(st, st.MyInfo.GetMyNodeNum()))
 			hw := &humanWriter{w: a.Stdout, maxPad: 32}
 			printed, dropped := 0, 0
-			err = c.Listen(ctx, func(p *pb.MeshPacket) error {
+			err = c.Listen(ctx, func(m *pb.FromRadio) error {
+				p := m.GetPacket()
 				if n := c.DroppedPackets(); n > dropped {
 					fmt.Fprintf(a.Stderr, "note: %d older packets were dropped (buffer full)\n", n-dropped)
 					dropped = n
@@ -246,7 +267,11 @@ func newListenCmd(a *app) *cobra.Command {
 				st := c.State() // names as currently known
 				var err error
 				if a.asJSON {
-					err = writeListenJSON(a.Stdout, st, p, time.Now())
+					var r *pb.FromRadio
+					if raw {
+						r = m
+					}
+					err = writeListenJSON(a.Stdout, st, p, r, time.Now())
 				} else {
 					err = hw.write(st, p, time.Now())
 				}
@@ -268,6 +293,8 @@ func newListenCmd(a *app) *cobra.Command {
 	fl := cmd.Flags()
 	fl.IntVar(&channel, "channel", 0, "only show messages on this channel index 0-7 (default: all channels)")
 	fl.BoolVar(&all, "all", false, "also show other packet types (by port name), replies and encrypted packets")
-	fl.IntVar(&count, "count", 0, "exit after printing this many messages (default: run until Ctrl-C)")
+	fl.IntVar(&count, "count", 0, "exit after printing this many messages (default: 1, or with --follow run until Ctrl-C)")
+	fl.BoolVarP(&follow, "follow", "f", false, "keep printing messages until Ctrl-C instead of exiting after the first")
+	fl.BoolVar(&raw, "raw", false, "with --json, include the whole FromRadio message under \"raw\"")
 	return cmd
 }

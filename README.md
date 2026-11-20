@@ -65,7 +65,7 @@ Other global flags: `--json`, `--yes` (skip confirmations), `--debug`, `--timeou
 | `shutdown` | Ask the node to power off (it shuts down in ~5 seconds) |
 | `factory-reset [--full]` | Erase the node's configuration (`--full` also erases device state) |
 | `send <text> [--to node] [--channel n] [--ack-timeout d]` | Send a text message; `--to` takes a `!hex` id, number or name (default: broadcast) |
-| `listen [--channel n] [--json] [--all] [--count n]` | Print received messages: the node's queued backlog, then new ones until Ctrl-C; `--all` adds other packet types, `--count` exits after n messages |
+| `listen [-f] [--channel n] [--json [--raw]] [--all] [--count n]` | Print the next received message and exit; `-f`/`--follow` keeps printing (the node's queued backlog, then new ones) until Ctrl-C; `--all` adds other packet types, `--count` exits after n messages, `--raw` adds the whole FromRadio message to each JSON line under `raw` |
 | `ble scan [--duration d]` | Scan for nearby Meshtastic devices over BLE |
 | `version` | Print the version |
 

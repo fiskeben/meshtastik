@@ -217,3 +217,69 @@ func TestListenCountValidated(t *testing.T) {
 		t.Fatal("count 0 accepted")
 	}
 }
+
+func TestListenExitsAfterFirstMessageWithoutFollow(t *testing.T) {
+	d := fakedevice.New()
+	d.Backlog = []*pb.MeshPacket{text(42, 0xffffffff, "one"), text(42, 0xffffffff, "two")}
+	out, _, err := runCLI(t, d, "", "listen")
+	if err != nil || out == "" || strings.Count(out, "\n") != 1 || !strings.Contains(out, ": one") {
+		t.Fatalf("%q %v", out, err)
+	}
+}
+
+func TestListenFollowKeepsGoing(t *testing.T) {
+	d := fakedevice.New()
+	d.Backlog = []*pb.MeshPacket{text(42, 0xffffffff, "one"), text(42, 0xffffffff, "two")}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(300 * time.Millisecond); cancel() }()
+	out, _, err := runCLICtx(t, ctx, d, func(string) bool { return false }, "listen", "-f")
+	if err != nil || strings.Count(out, "\n") != 2 || !strings.Contains(out, ": two") {
+		t.Fatalf("%q %v", out, err)
+	}
+	d = fakedevice.New()
+	d.Backlog = []*pb.MeshPacket{text(42, 0xffffffff, "one"), text(42, 0xffffffff, "two"), text(42, 0xffffffff, "three")}
+	out, _, err = runCLI(t, d, "", "listen", "--follow", "--count", "2")
+	if err != nil || strings.Count(out, "\n") != 2 || strings.Contains(out, "three") {
+		t.Fatalf("%q %v", out, err)
+	}
+}
+
+func TestListenRawIncludesFromRadio(t *testing.T) {
+	d := fakedevice.New()
+	d.Backlog = []*pb.MeshPacket{text(42, 0xffffffff, "hello\u0085")}
+	out, _, err := runCLI(t, d, "", "listen", "--json", "--raw")
+	if err != nil || strings.Count(out, "\n") != 1 || strings.ContainsRune(out, '\u0085') {
+		t.Fatalf("%q %v", out, err)
+	}
+	var m struct {
+		Text string `json:"text"`
+		Raw  struct {
+			ID     *uint32 `json:"id"`
+			Packet struct {
+				From    uint32 `json:"from"`
+				Decoded struct {
+					Portnum string `json:"portnum"`
+					Payload string `json:"payload"`
+				} `json:"decoded"`
+			} `json:"packet"`
+		} `json:"raw"`
+	}
+	if err := json.Unmarshal([]byte(out), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m.Text != "hello\u0085" || m.Raw.ID == nil || m.Raw.Packet.From != 42 || m.Raw.Packet.Decoded.Portnum != "TEXT_MESSAGE_APP" || m.Raw.Packet.Decoded.Payload == "" {
+		t.Fatalf("%+v", m)
+	}
+	d = fakedevice.New()
+	d.Backlog = []*pb.MeshPacket{text(42, 0xffffffff, "hello")}
+	out, _, err = runCLI(t, d, "", "listen", "--json")
+	if err != nil || strings.Contains(out, `"raw"`) {
+		t.Fatalf("%q %v", out, err)
+	}
+}
+
+func TestListenRawRequiresJSON(t *testing.T) {
+	if _, _, err := runCLI(t, fakedevice.New(), "", "listen", "--raw"); err == nil || !strings.Contains(err.Error(), "--json") {
+		t.Fatal(err)
+	}
+}
