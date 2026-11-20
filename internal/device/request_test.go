@@ -26,7 +26,7 @@ func withRemoteOpts(t *testing.T, o device.Options, setup func(*fakedevice.Devic
 	t.Helper()
 	d := fakedevice.New()
 	r := fakedevice.NewRemote(hill, "Hill", "HIL1")
-	r.AdminKeys = [][]byte{d.PublicKey}
+	r.Config.Security.AdminKey = [][]byte{d.PublicKey}
 	d.Remotes = map[uint32]*fakedevice.Remote{hill: r}
 	if setup != nil {
 		setup(d, r)

@@ -125,6 +125,7 @@ func New() *Device {
 	d.PublicKey = make([]byte, 32)
 	rand.Read(d.PublicKey)
 	d.Config.Security.PublicKey = d.PublicKey
+	d.Owner.PublicKey = d.PublicKey                 // the node lists itself with its key
 	d.Config.Security.PrivateKey = make([]byte, 32) // a real node holds both halves
 	rand.Read(d.Config.Security.PrivateKey)
 	for i := range d.Channels {

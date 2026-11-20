@@ -45,8 +45,8 @@ func confirmOrAbort(ctx context.Context, a *app, prompt string) error {
 
 func newConfigCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{Use: "config", Short: "Read and change the node's configuration"}
-	cmd.AddCommand(newConfigGetCmd(a), newConfigSetCmd(a),
-		newConfigExportCmd(a), newConfigImportCmd(a))
+	cmd.AddCommand(supportsDest(newConfigGetCmd(a)), supportsDest(newConfigSetCmd(a)),
+		supportsDest(newConfigExportCmd(a)), supportsDest(newConfigImportCmd(a)))
 	return cmd
 }
 
@@ -56,18 +56,22 @@ func newConfigGetCmd(a *app) *cobra.Command {
 		Short: "Show the whole configuration, a section, or one field (e.g. lora.region)",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := a.connect(cmd)
+			want := allWant
+			var p configpath.Path
+			if len(args) == 1 {
+				var err error
+				if p, err = configpath.Parse(args[0]); err != nil {
+					return err
+				}
+				want = sectionWant(p.Section)
+			}
+			c, _, st, err := a.target(cmd, want)
 			if err != nil {
 				return err
 			}
 			defer c.Close()
-			st := c.State()
 			if len(args) == 0 {
 				return printAllConfig(a, st)
-			}
-			p, err := configpath.Parse(args[0])
-			if err != nil {
-				return err
 			}
 			if p.Field == "" {
 				sec := configpath.Section(redactKey(st.Config), st.ModuleConfig, p)
@@ -156,12 +160,16 @@ func newConfigSetCmd(a *app) *cobra.Command {
 				}
 				paths = append(paths, p)
 			}
-			c, err := a.connect(cmd)
+			var want device.Want
+			for _, p := range paths {
+				w := sectionWant(p.Section)
+				want.Config, want.Modules = append(want.Config, w.Config...), append(want.Modules, w.Modules...)
+			}
+			c, n, st, err := a.target(cmd, want)
 			if err != nil {
 				return err
 			}
 			defer c.Close()
-			st := c.State()
 			cfg := proto.Clone(st.Config).(*pb.LocalConfig)
 			mod := proto.Clone(st.ModuleConfig).(*pb.LocalModuleConfig)
 			for i, p := range paths {
@@ -177,18 +185,25 @@ func newConfigSetCmd(a *app) *cobra.Command {
 			for _, s := range ms {
 				changes = append(changes, device.Change{ModuleConfig: s})
 			}
-			return applyChanges(cmd, a, c, changes)
+			return applyChanges(cmd, a, c, n, st, changes)
 		},
 	}
 }
 
-// applyChanges checks changes for lock-out risks, confirms if there are any,
-// applies them with read-back verification and reports the result.
-func applyChanges(cmd *cobra.Command, a *app, c *device.Client, changes []device.Change) error {
-	if err := device.ManagedRefusal(c.State(), changes); err != nil {
-		return err
+// applyChanges checks changes to node n (whose state is before) for lock-out
+// risks, confirms if there are any, applies them with read-back
+// verification and reports the result.
+func applyChanges(cmd *cobra.Command, a *app, c *device.Client, n device.Node, before *device.State, changes []device.Change) error {
+	var risks []string
+	if n.IsRemote() {
+		risks = device.RemoteRisks(before, c.State().Config.GetSecurity().GetPublicKey(), changes)
+	} else {
+		if err := device.ManagedRefusal(before, changes); err != nil {
+			return err
+		}
+		risks = device.LockoutRisks(c.Kind(), before, changes)
 	}
-	if risks := device.LockoutRisks(c.Kind(), c.State(), changes); len(risks) > 0 {
+	if len(risks) > 0 {
 		for _, r := range risks {
 			fmt.Fprintf(a.Stderr, "Warning: %s\n", r)
 		}
@@ -196,16 +211,23 @@ func applyChanges(cmd *cobra.Command, a *app, c *device.Client, changes []device
 			return err
 		}
 	}
-	n, err := c.Apply(cmd.Context(), changes)
+	applied, err := n.Apply(cmd.Context(), changes)
+	note := ""
+	if errors.Is(err, device.ErrCoordinatesUnverified) {
+		note, err = err.Error(), nil
+	}
 	if err != nil {
 		return err
 	}
-	if n == 0 {
+	if applied == 0 {
 		_, err = fmt.Fprintln(a.Stdout, "No changes needed.")
 		return err
 	}
-	_, err = fmt.Fprintf(a.Stdout, "Applied %d change(s); verified.\n", n)
-	return err
+	fmt.Fprintf(a.Stdout, "Applied %d change(s); verified.\n", applied)
+	if note != "" {
+		fmt.Fprintf(a.Stderr, "note: %s\n", note)
+	}
+	return nil
 }
 
 func newConfigExportCmd(a *app) *cobra.Command {
@@ -217,14 +239,17 @@ func newConfigExportCmd(a *app) *cobra.Command {
 			"The backup contains the node's private key; a file is written with mode 0600.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := a.connect(cmd)
+			c, n, st, err := a.target(cmd, allWant)
 			if err != nil {
 				return err
 			}
 			defer c.Close()
-			data, err := backup.Export(c.State())
+			data, err := backup.Export(st)
 			if err != nil {
 				return err
+			}
+			if n.IsRemote() {
+				fmt.Fprintln(a.Stderr, "note: a remote node never sends its private key; the backup has none")
 			}
 			if out == "" {
 				_, err = a.Stdout.Write(data)
@@ -247,6 +272,9 @@ func newConfigImportCmd(a *app) *cobra.Command {
 			"are left alone unless --keys is given.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if keys && a.dest != "" {
+				return errors.New("--keys cannot be used with --dest: a private key must not be sent over the air")
+			}
 			data, err := os.ReadFile(args[0])
 			if err != nil {
 				return err
@@ -279,12 +307,11 @@ func newConfigImportCmd(a *app) *cobra.Command {
 					}
 				}
 			}
-			c, err := a.connect(cmd)
+			c, n, st, err := a.target(cmd, allWant)
 			if err != nil {
 				return err
 			}
 			defer c.Close()
-			st := c.State()
 			base := proto.Clone(st.Config).(*pb.LocalConfig)
 			if set != nil && set.LoraConfig != nil {
 				base.Lora = set.LoraConfig
@@ -348,7 +375,7 @@ func newConfigImportCmd(a *app) *cobra.Command {
 			for _, k := range doc.Unsupported {
 				fmt.Fprintf(a.Stderr, "not supported, ignored: %s\n", k)
 			}
-			return applyChanges(cmd, a, c, changes)
+			return applyChanges(cmd, a, c, n, st, changes)
 		},
 	}
 	cmd.Flags().BoolVar(&keys, "keys", false, "also apply security.private_key and security.public_key")

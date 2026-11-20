@@ -55,12 +55,12 @@ func newOwnerCmd(a *app) *cobra.Command {
 					return err
 				}
 			}
-			c, err := a.connect(cmd)
+			c, n, st, err := a.target(cmd, device.Want{Owner: true})
 			if err != nil {
 				return err
 			}
 			defer c.Close()
-			self := c.State().Self().GetUser()
+			self := st.Self().GetUser()
 			if self == nil && !shortSet {
 				return errors.New("the node did not report its current owner; pass --short")
 			}
@@ -72,55 +72,59 @@ func newOwnerCmd(a *app) *cobra.Command {
 			if shortSet {
 				u.ShortName = short
 			}
-			return applyChanges(cmd, a, c, []device.Change{{Owner: u}})
+			return applyChanges(cmd, a, c, n, st, []device.Change{{Owner: u}})
 		},
 	}
 	set.Flags().StringVar(&short, "short", "", "short name (up to 4 bytes); kept unchanged if omitted")
-	cmd.AddCommand(set)
+	cmd.AddCommand(supportsDest(set))
 	return cmd
 }
 
 func newRebootCmd(a *app) *cobra.Command {
-	return &cobra.Command{
+	return supportsDest(&cobra.Command{
 		Use:   "reboot",
 		Short: "Ask the node to reboot (it restarts in ~5 seconds)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := a.connect(cmd)
+			c, n, _, err := a.target(cmd, device.Want{})
 			if err != nil {
 				return err
 			}
 			defer c.Close()
-			if err := c.Reboot(cmd.Context(), powerDelay); err != nil {
+			if err := n.Reboot(cmd.Context(), powerDelay); err != nil {
 				return err
 			}
 			_, err = fmt.Fprintf(a.Stdout, "Reboot requested (node restarts in ~%d seconds).\n", powerDelay)
 			return err
 		},
-	}
+	})
 }
 
 func newShutdownCmd(a *app) *cobra.Command {
-	return &cobra.Command{
+	return supportsDest(&cobra.Command{
 		Use:   "shutdown",
 		Short: "Ask the node to power off (it shuts down in ~5 seconds)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := confirmOrAbort(cmd.Context(), a, "Shut the node down? It stays off until powered on again."); err != nil {
-				return err
-			}
-			c, err := a.connect(cmd)
+			c, n, _, err := a.target(cmd, device.Want{})
 			if err != nil {
 				return err
 			}
 			defer c.Close()
-			if err := c.Shutdown(cmd.Context(), powerDelay); err != nil {
+			prompt := "Shut the node down? It stays off until powered on again."
+			if n.IsRemote() {
+				prompt += " It cannot be powered on remotely."
+			}
+			if err := confirmOrAbort(cmd.Context(), a, prompt); err != nil {
+				return err
+			}
+			if err := n.Shutdown(cmd.Context(), powerDelay); err != nil {
 				return err
 			}
 			_, err = fmt.Fprintf(a.Stdout, "Shutdown requested (node powers off in ~%d seconds).\n", powerDelay)
 			return err
 		},
-	}
+	})
 }
 
 func newFactoryResetCmd(a *app) *cobra.Command {
@@ -130,19 +134,22 @@ func newFactoryResetCmd(a *app) *cobra.Command {
 		Short: "Erase the node's configuration (--full also erases device state)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			prompt := "Factory reset the node? This erases its configuration."
-			if full {
-				prompt = "Fully factory reset the node? This erases its configuration and device state (including the node database and keys)."
-			}
-			if err := confirmOrAbort(cmd.Context(), a, prompt); err != nil {
-				return err
-			}
-			c, err := a.connect(cmd)
+			c, n, _, err := a.target(cmd, device.Want{})
 			if err != nil {
 				return err
 			}
 			defer c.Close()
-			if err := c.FactoryReset(cmd.Context(), full); err != nil {
+			prompt := "Factory reset the node? This erases its configuration."
+			if full {
+				prompt = "Fully factory reset the node? This erases its configuration and device state (including the node database and keys)."
+			}
+			if n.IsRemote() {
+				prompt += " Its admin keys are erased, so it cannot be administered remotely afterwards."
+			}
+			if err := confirmOrAbort(cmd.Context(), a, prompt); err != nil {
+				return err
+			}
+			if err := n.FactoryReset(cmd.Context(), full); err != nil {
 				return err
 			}
 			_, err = fmt.Fprintln(a.Stdout, "Factory reset sent; the node will reboot.")
@@ -150,5 +157,5 @@ func newFactoryResetCmd(a *app) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&full, "full", false, "also erase device state")
-	return cmd
+	return supportsDest(cmd)
 }

@@ -29,20 +29,21 @@ func newNodesOpCmd(a *app, op device.NodeOp, short string) *cobra.Command {
 		Long:  short + ".\n\nA node is a !hex id, a number, or a unique short or long name.",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := a.connect(cmd)
+			c, n, _, err := a.target(cmd, device.Want{})
 			if err != nil {
 				return err
 			}
 			defer c.Close()
-			st := c.State()
+			st := c.State() // nodes are named from the connected node's list, even for --dest
 			nums := make([]uint32, len(args))
 			for i, q := range args {
 				if nums[i], err = resolveNode(st, q); err != nil {
 					return err
 				}
 				// The firmware silently does nothing for a node it does not
-				// list; only ignore (2.8 and newer) adds the entry.
-				if _, listed := st.Nodes[nums[i]]; !listed && op != device.Ignore {
+				// list; only ignore (2.8 and newer) adds the entry. A remote
+				// node's list cannot be read.
+				if _, listed := st.Nodes[nums[i]]; !listed && op != device.Ignore && !n.IsRemote() {
 					return fmt.Errorf("%s is not in the node list", nodeID(nums[i]))
 				}
 			}
@@ -53,7 +54,12 @@ func newNodesOpCmd(a *app, op device.NodeOp, short string) *cobra.Command {
 			}
 			for _, num := range nums {
 				ref := nodeRef(st, num)
-				if err := c.EditNodeDB(cmd.Context(), op, num); err != nil {
+				err := n.EditNodeDB(cmd.Context(), op, num)
+				if errors.Is(err, device.ErrNotVerifiable) {
+					fmt.Fprintf(a.Stdout, "%s %s: sent (a remote node list cannot be read back)\n", op, ref)
+					continue
+				}
+				if err != nil {
 					var ve *device.VerifyError
 					if _, listed := st.Nodes[num]; !listed && errors.As(err, &ve) {
 						return fmt.Errorf("%s %s: %w (older firmware can only ignore nodes it already lists)", op, ref, err)
@@ -79,12 +85,17 @@ func newNodesResetCmd(a *app) *cobra.Command {
 			if err := confirmOrAbort(cmd.Context(), a, "Reset the node list? The node reboots."); err != nil {
 				return err
 			}
-			c, err := a.connect(cmd)
+			c, n, _, err := a.target(cmd, device.Want{})
 			if err != nil {
 				return err
 			}
 			defer c.Close()
-			if err := c.ResetNodeDB(cmd.Context(), keep); err != nil {
+			err = n.ResetNodeDB(cmd.Context(), keep)
+			if errors.Is(err, device.ErrNotVerifiable) {
+				_, err = fmt.Fprintln(a.Stdout, "Node list reset sent; the node reboots (a remote node list cannot be read back).")
+				return err
+			}
+			if err != nil {
 				return err
 			}
 			_, err = fmt.Fprintln(a.Stdout, "Node list reset; the node rebooted.")

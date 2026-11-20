@@ -27,7 +27,7 @@ type rig struct {
 func newRig(t *testing.T, setup func(*fakedevice.Device, *fakedevice.Remote)) *rig {
 	d := fakedevice.New()
 	r := fakedevice.NewRemote(remoteNum, "Hill", "HIL1")
-	r.AdminKeys = [][]byte{d.PublicKey}
+	r.Config.Security.AdminKey = [][]byte{d.PublicKey}
 	d.Remotes = map[uint32]*fakedevice.Remote{remoteNum: r}
 	if setup != nil {
 		setup(d, r)
@@ -153,7 +153,7 @@ func TestRemoteAnswersOwnerWithPasskey(t *testing.T) {
 }
 
 func TestRemoteRefusesUnknownAdminKey(t *testing.T) {
-	g := newRig(t, func(_ *fakedevice.Device, r *fakedevice.Remote) { r.AdminKeys = nil })
+	g := newRig(t, func(_ *fakedevice.Device, r *fakedevice.Remote) { r.Config.Security.AdminKey = nil })
 	ps := g.admin(getOwner)
 	if len(ps) != 1 || routing(t, ps[0]) != pb.Routing_ADMIN_PUBLIC_KEY_UNAUTHORIZED || ps[0].GetFrom() != remoteNum {
 		t.Fatal(ps)

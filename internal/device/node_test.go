@@ -44,7 +44,7 @@ func TestRemoteFetchAll(t *testing.T) {
 	var parts []string
 	d := fakedevice.New()
 	r := fakedevice.NewRemote(hill, "Hill", "HIL1")
-	r.AdminKeys = [][]byte{d.PublicKey}
+	r.Config.Security.AdminKey = [][]byte{d.PublicKey}
 	r.Config.Lora.HopLimit = 6
 	r.ModuleConfig.Mqtt.Enabled = true
 	r.Channels[1] = &pb.Channel{Index: 1, Role: pb.Channel_SECONDARY, Settings: &pb.ChannelSettings{Name: "ops"}}

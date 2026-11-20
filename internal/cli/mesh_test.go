@@ -20,7 +20,7 @@ func withHill(setup func(*fakedevice.Remote)) *fakedevice.Device {
 	d := fakedevice.New()
 	d.ExtraNodes = []*pb.NodeInfo{{Num: 7, User: &pb.User{LongName: "Relay", ShortName: "RLY1"}}}
 	r := fakedevice.NewRemote(hillNum, "Hill", "HIL1")
-	r.AdminKeys = [][]byte{d.PublicKey}
+	r.Config.Security.AdminKey = [][]byte{d.PublicKey}
 	r.Route, r.RouteBack = []uint32{7}, []uint32{7}
 	if setup != nil {
 		setup(r)

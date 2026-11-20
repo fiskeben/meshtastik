@@ -24,8 +24,10 @@ const maxChannelName = 11
 
 func newChannelCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{Use: "channel", Short: "Manage channels and channel URLs"}
-	cmd.AddCommand(newChannelListCmd(a), newChannelAddCmd(a), newChannelSetCmd(a),
-		newChannelDelCmd(a), newChannelURLCmd(a))
+	subs := []*cobra.Command{newChannelListCmd(a), newChannelAddCmd(a), newChannelSetCmd(a),
+		newChannelDelCmd(a), newChannelURLCmd(a)}
+	supportsDest(subs...)
+	cmd.AddCommand(subs...)
 	return cmd
 }
 
@@ -89,12 +91,11 @@ func newChannelListCmd(a *app) *cobra.Command {
 		Short: "List the node's channels",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := a.connect(cmd)
+			c, _, st, err := a.target(cmd, device.Want{Channels: true})
 			if err != nil {
 				return err
 			}
 			defer c.Close()
-			st := c.State()
 			if a.asJSON {
 				rows := []map[string]any{}
 				for _, ch := range st.Channels {
@@ -143,14 +144,14 @@ func newChannelAddCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			c, err := a.connect(cmd)
+			c, n, st, err := a.target(cmd, device.Want{Channels: true})
 			if err != nil {
 				return err
 			}
 			defer c.Close()
-			for i, ch := range c.State().Channels {
+			for i, ch := range st.Channels {
 				if ch.GetRole() == pb.Channel_DISABLED {
-					return applyChanges(cmd, a, c, []device.Change{{Channel: &pb.Channel{
+					return applyChanges(cmd, a, c, n, st, []device.Change{{Channel: &pb.Channel{
 						Index: int32(i), Role: pb.Channel_SECONDARY,
 						Settings: &pb.ChannelSettings{Name: args[0], Psk: key},
 					}}})
@@ -174,12 +175,12 @@ func newChannelSetCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			c, err := a.connect(cmd)
+			c, n, st, err := a.target(cmd, device.Want{Channels: true})
 			if err != nil {
 				return err
 			}
 			defer c.Close()
-			cur := c.State().Channels[idx]
+			cur := st.Channels[idx]
 			if cur.GetRole() == pb.Channel_DISABLED {
 				return fmt.Errorf("channel %d is not in use; create it with channel add", idx)
 			}
@@ -197,7 +198,7 @@ func newChannelSetCmd(a *app) *cobra.Command {
 			if err := checkChannelName(ch.Settings.Name); err != nil {
 				return err
 			}
-			return applyChanges(cmd, a, c, []device.Change{{Channel: ch}})
+			return applyChanges(cmd, a, c, n, st, []device.Change{{Channel: ch}})
 		},
 	}
 }
@@ -215,12 +216,12 @@ func newChannelDelCmd(a *app) *cobra.Command {
 			if idx == 0 {
 				return errors.New("cannot delete the primary channel (index 0)")
 			}
-			c, err := a.connect(cmd)
+			c, n, st, err := a.target(cmd, device.Want{Channels: true})
 			if err != nil {
 				return err
 			}
 			defer c.Close()
-			cur := c.State().Channels
+			cur := st.Channels
 			if cur[idx].GetRole() == pb.Channel_DISABLED {
 				return fmt.Errorf("channel %d is not in use", idx)
 			}
@@ -233,7 +234,7 @@ func newChannelDelCmd(a *app) *cobra.Command {
 				}
 				changes = append(changes, device.Change{Channel: next})
 			}
-			return applyChanges(cmd, a, c, changes)
+			return applyChanges(cmd, a, c, n, st, changes)
 		},
 	}
 }
@@ -288,12 +289,11 @@ func newChannelURLCmd(a *app) *cobra.Command {
 					}
 				}
 			}
-			c, err := a.connect(cmd)
+			c, n, st, err := a.target(cmd, device.Want{Channels: true, Config: []string{"lora"}})
 			if err != nil {
 				return err
 			}
 			defer c.Close()
-			st := c.State()
 			if newSet == nil {
 				u, err := channelurl.Encode(st.Channels, st.Config.GetLora())
 				if err != nil {
@@ -317,7 +317,7 @@ func newChannelURLCmd(a *app) *cobra.Command {
 					PayloadVariant: &pb.Config_Lora{Lora: newSet.LoraConfig},
 				}})
 			}
-			return applyChanges(cmd, a, c, changes)
+			return applyChanges(cmd, a, c, n, st, changes)
 		},
 	}
 	cmd.Flags().StringVar(&set, "set", "", "replace all channels and LoRa settings from this URL")

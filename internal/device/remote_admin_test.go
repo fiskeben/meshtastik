@@ -31,7 +31,7 @@ func TestRemoteAdminRequestGetsOwner(t *testing.T) {
 }
 
 func TestRemoteUnauthorizedNamesTheFix(t *testing.T) {
-	c, _, _ := withRemote(t, func(_ *fakedevice.Device, r *fakedevice.Remote) { r.AdminKeys = nil })
+	c, _, _ := withRemote(t, func(_ *fakedevice.Device, r *fakedevice.Remote) { r.Config.Security.AdminKey = nil })
 	_, err := device.AdminRequestTo(c, ctxT(t), hill, getOwner)
 	var re *device.RoutingError
 	if !errors.As(err, &re) || re.Reason != pb.Routing_ADMIN_PUBLIC_KEY_UNAUTHORIZED || !strings.Contains(err.Error(), "admin-key add") {

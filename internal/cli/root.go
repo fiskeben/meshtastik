@@ -136,6 +136,7 @@ type app struct {
 	yes      bool
 	debug    bool
 	noDaemon bool
+	dest     string
 	timeout  time.Duration
 
 	versionNoted bool // the daemon version mismatch note was printed
@@ -171,6 +172,9 @@ func (a *app) connectWith(cmd *cobra.Command, backlog bool, adjust func(*device.
 	}
 	if a.debug {
 		opts.Log = a.Stderr
+	}
+	if a.dest != "" && isTerminal(a.Stderr) {
+		opts.OnProgress = func(part string) { fmt.Fprintf(a.Stderr, "reading %s…\n", part) }
 	}
 	if adjust != nil {
 		adjust(&opts)
@@ -249,7 +253,7 @@ func NewRoot(d Deps) *cobra.Command {
 			if n > 1 {
 				return errors.New("only one of --port, --host, --ble may be given")
 			}
-			return nil
+			return a.checkDest(cmd)
 		},
 	}
 	if d.Stdout != nil {
@@ -265,6 +269,7 @@ func NewRoot(d Deps) *cobra.Command {
 	pf.BoolVar(&a.asJSON, "json", false, "output JSON")
 	pf.BoolVar(&a.yes, "yes", false, "skip confirmations")
 	pf.BoolVar(&a.debug, "debug", false, "debug logging")
+	pf.StringVar(&a.dest, "dest", "", "administer this node over the mesh instead of the connected one: a !hex id, number or name")
 	pf.BoolVar(&a.noDaemon, "no-daemon", false, "connect to the node directly instead of through the background daemon (also MESHTASTIK_NO_DAEMON=1)")
 	pf.DurationVar(&a.timeout, "timeout", 0, "timeout that bounds the handshake and each request, not the whole operation (0 = per-transport default; 30s per answer over the mesh)")
 

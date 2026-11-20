@@ -23,7 +23,6 @@ type Remote struct {
 	Config          *pb.LocalConfig
 	ModuleConfig    *pb.LocalModuleConfig
 	Channels        [8]*pb.Channel
-	AdminKeys       [][]byte      // public keys allowed to administer it
 	Route           []uint32      // traceroute hops towards it (intermediate nodes)
 	RouteBack       []uint32      // traceroute hops back
 	Position        *pb.Position  // nil: no position to share (requests get NO_RESPONSE)
@@ -202,7 +201,7 @@ func (d *Device) remoteAnswers(r *Remote, p *pb.MeshPacket) []*pb.FromRadio {
 			return refuse(me, pb.Routing_PKI_UNKNOWN_PUBKEY)
 		case !p.GetPkiEncrypted():
 			return refuse(r.Num, pb.Routing_NOT_AUTHORIZED)
-		case !slices.ContainsFunc(r.AdminKeys, func(k []byte) bool { return bytes.Equal(k, d.PublicKey) }):
+		case !slices.ContainsFunc(r.Config.GetSecurity().GetAdminKey(), func(k []byte) bool { return bytes.Equal(k, d.PublicKey) }):
 			return refuse(r.Num, pb.Routing_ADMIN_PUBLIC_KEY_UNAUTHORIZED)
 		case !strings.HasPrefix(adminType, "get_") && (r.passkey == nil || !bytes.Equal(m.SessionPasskey, r.passkey)):
 			return refuse(r.Num, pb.Routing_ADMIN_BAD_SESSION_KEY)

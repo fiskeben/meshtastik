@@ -48,17 +48,16 @@ func keyText(k []byte) string {
 }
 
 func newInfoCmd(a *app) *cobra.Command {
-	return &cobra.Command{
+	return supportsDest(&cobra.Command{
 		Use:   "info",
 		Short: "Show the connected node's identity and basics",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := a.connect(cmd)
+			c, n, st, err := a.target(cmd, device.Want{Owner: true, Metadata: true, Channels: true, Config: []string{"device", "lora", "security"}})
 			if err != nil {
 				return err
 			}
 			defer c.Close()
-			st := c.State()
 			self := st.Self()
 			num := st.MyInfo.GetMyNodeNum()
 			channels := 0
@@ -83,6 +82,7 @@ func newInfoCmd(a *app) *cobra.Command {
 					"battery_level": bat,
 					"channels":      channels,
 					"public_key":    key,
+					"remote":        n.IsRemote(),
 				})
 			}
 			tw := tabwriter.NewWriter(a.Stdout, 0, 4, 2, ' ', 0)
@@ -100,7 +100,7 @@ func newInfoCmd(a *app) *cobra.Command {
 			row("Public key", orDash(key))
 			return tw.Flush()
 		},
-	}
+	})
 }
 
 type nodeRow struct {
@@ -202,13 +202,15 @@ func newNodesCmd(a *app) *cobra.Command {
 			return tw.Flush()
 		},
 	}
-	cmd.AddCommand(
+	for _, sub := range []*cobra.Command{
 		newNodesOpCmd(a, device.RemoveNode, "Remove nodes from the node list"),
 		newNodesOpCmd(a, device.Favorite, "Mark nodes as favourites"),
 		newNodesOpCmd(a, device.Unfavorite, "Unmark favourite nodes"),
 		newNodesOpCmd(a, device.Ignore, "Ignore nodes: the node drops their packets"),
 		newNodesOpCmd(a, device.Unignore, "Stop ignoring nodes"),
 		newNodesResetCmd(a),
-	)
+	} {
+		cmd.AddCommand(supportsDest(sub))
+	}
 	return cmd
 }

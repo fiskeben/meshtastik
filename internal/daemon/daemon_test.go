@@ -323,7 +323,7 @@ func TestProtocolMismatchIsRefused(t *testing.T) {
 func TestRemoteAdminDoesNotStaleTheCache(t *testing.T) {
 	d := fakedevice.New()
 	r := fakedevice.NewRemote(0x99, "Hill", "HIL1")
-	r.AdminKeys = [][]byte{d.PublicKey}
+	r.Config.Security.AdminKey = [][]byte{d.PublicKey}
 	d.Remotes = map[uint32]*fakedevice.Remote{0x99: r}
 	h := start(t, d, 0)
 	c := h.open(t, false)

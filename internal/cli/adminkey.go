@@ -85,13 +85,13 @@ func newAdminKeyCmd(a *app) *cobra.Command {
 		Short: "List the admin keys, naming the node each belongs to when known",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := a.connect(cmd)
+			c, _, target, err := a.target(cmd, device.Want{Config: []string{"security"}})
 			if err != nil {
 				return err
 			}
 			defer c.Close()
-			st := c.State()
-			keys := st.Config.GetSecurity().GetAdminKey()
+			st := c.State() // names come from the connected node's list
+			keys := target.Config.GetSecurity().GetAdminKey()
 			if a.asJSON {
 				type row struct {
 					Index int     `json:"index"`
@@ -129,17 +129,16 @@ func newAdminKeyCmd(a *app) *cobra.Command {
 		Short: "Allow a key to administer the node",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := a.connect(cmd)
+			c, n, target, err := a.target(cmd, device.Want{Config: []string{"security"}})
 			if err != nil {
 				return err
 			}
 			defer c.Close()
-			st := c.State()
-			k, err := parseKeyRef(st, args[0])
+			k, err := parseKeyRef(c.State(), args[0])
 			if err != nil {
 				return err
 			}
-			keys := st.Config.GetSecurity().GetAdminKey()
+			keys := target.Config.GetSecurity().GetAdminKey()
 			for _, have := range keys {
 				if bytes.Equal(have, k) {
 					_, err := fmt.Fprintln(a.Stdout, "already listed")
@@ -149,7 +148,7 @@ func newAdminKeyCmd(a *app) *cobra.Command {
 			if len(keys) >= maxAdminKeys {
 				return fmt.Errorf("the node holds at most %d admin keys; remove one first", maxAdminKeys)
 			}
-			return applyChanges(cmd, a, c, []device.Change{securityChange(st, append(append([][]byte{}, keys...), k))})
+			return applyChanges(cmd, a, c, n, target, []device.Change{securityChange(target, append(append([][]byte{}, keys...), k))})
 		},
 	}
 	remove := &cobra.Command{
@@ -157,13 +156,13 @@ func newAdminKeyCmd(a *app) *cobra.Command {
 		Short: "Stop a key from administering the node",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := a.connect(cmd)
+			c, n, target, err := a.target(cmd, device.Want{Config: []string{"security"}})
 			if err != nil {
 				return err
 			}
 			defer c.Close()
 			st := c.State()
-			keys := st.Config.GetSecurity().GetAdminKey()
+			keys := target.Config.GetSecurity().GetAdminKey()
 			drop := -1
 			if i, err := strconv.Atoi(args[0]); err == nil && len(args[0]) == 1 {
 				if i < 0 || i >= len(keys) {
@@ -185,9 +184,10 @@ func newAdminKeyCmd(a *app) *cobra.Command {
 				}
 			}
 			rest := append(append([][]byte{}, keys[:drop]...), keys[drop+1:]...)
-			return applyChanges(cmd, a, c, []device.Change{securityChange(st, rest)})
+			return applyChanges(cmd, a, c, n, target, []device.Change{securityChange(target, rest)})
 		},
 	}
+	supportsDest(list, add, remove)
 	cmd.AddCommand(list, add, remove)
 	return cmd
 }
