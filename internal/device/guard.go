@@ -1,11 +1,14 @@
 package device
 
 import (
+	"bytes"
 	"errors"
+	"slices"
 	"strings"
 
 	"google.golang.org/protobuf/proto"
 
+	"meshtastik/internal/configpath"
 	"meshtastik/internal/transport"
 )
 
@@ -59,6 +62,44 @@ func LockoutRisks(kind transport.Kind, before *State, changes []Change) []string
 			was, now := before.ModuleConfig.GetSerial(), ch.ModuleConfig.GetSerial()
 			if kind == transport.KindSerial && !was.GetOverrideConsoleSerialPort() && now.GetOverrideConsoleSerialPort() {
 				risks = append(risks, "serial.override_console_serial_port=true hands the USB serial console to the serial module, cutting off the link this command is using")
+			}
+		}
+	}
+	return risks
+}
+
+// remoteLinkFields are the LoRa settings that must match the rest of the
+// mesh for a remote node to stay reachable.
+var remoteLinkFields = []string{"lora.region", "lora.use_preset", "lora.modem_preset", "lora.bandwidth", "lora.spread_factor",
+	"lora.coding_rate", "lora.frequency_offset", "lora.override_frequency", "lora.channel_num"}
+
+// RemoteRisks describes, in human sentences, how applying changes to remote
+// node before could cut this node off from it: myPublicKey is the key that
+// lets this node administer it.
+func RemoteRisks(before *State, myPublicKey []byte, changes []Change) []string {
+	var risks []string
+	for _, ch := range changes {
+		switch {
+		case ch.Config.GetLora() != nil:
+			name, want, got, _ := section(ch.Config.ProtoReflect(), before.Config.ProtoReflect())
+			for _, d := range configpath.FieldDiffs(name, want, got) {
+				if slices.Contains(remoteLinkFields, d.Path) {
+					risks = append(risks, "changing "+d.Path+" can take the node off this mesh, out of reach of remote admin")
+				}
+			}
+			if before.Config.GetLora().GetTxEnabled() && !ch.Config.GetLora().GetTxEnabled() {
+				risks = append(risks, "lora.tx_enabled=false stops the node transmitting: it can no longer answer remote admin")
+			}
+		case ch.Channel.GetIndex() == 0 && ch.Channel != nil:
+			for _, d := range ch.diff(before) {
+				if d.Path == "channel[0].psk" || d.Path == "channel[0].name" || d.Path == "channel[0].role" {
+					risks = append(risks, "changing "+d.Path+" changes the primary channel this node reaches the node on")
+					break
+				}
+			}
+		case ch.Config.GetSecurity() != nil:
+			if !slices.ContainsFunc(ch.Config.GetSecurity().GetAdminKey(), func(k []byte) bool { return bytes.Equal(k, myPublicKey) }) {
+				risks = append(risks, "the new security.admin_key list leaves out this node's public key: it can no longer administer the node remotely")
 			}
 		}
 	}

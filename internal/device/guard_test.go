@@ -1,10 +1,12 @@
 package device_test
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
 	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
+	"google.golang.org/protobuf/proto"
 
 	"meshtastik/internal/device"
 	"meshtastik/internal/transport"
@@ -69,5 +71,69 @@ func TestLockoutRiskWifiOverBLE(t *testing.T) {
 	st.Config.Network.WifiEnabled = true
 	if r := device.LockoutRisks(transport.KindBLE, st, wifiOn); len(r) != 0 {
 		t.Fatal("wifi already on:", r)
+	}
+}
+
+// remoteBefore is a remote node's state as Remote.Fetch builds it.
+func remoteBefore() *device.State {
+	return &device.State{
+		Config: &pb.LocalConfig{
+			Lora:     &pb.Config_LoRaConfig{Region: pb.Config_LoRaConfig_EU_868, UsePreset: true, ModemPreset: pb.Config_LoRaConfig_LONG_FAST, HopLimit: 3, TxEnabled: true},
+			Security: &pb.Config_SecurityConfig{AdminKey: [][]byte{bytes.Repeat([]byte{7}, 32)}},
+		},
+		ModuleConfig: &pb.LocalModuleConfig{},
+		Channels:     [8]*pb.Channel{{Index: 0, Role: pb.Channel_PRIMARY, Settings: &pb.ChannelSettings{Psk: []byte{1}}}},
+	}
+}
+
+func loraWith(f func(*pb.Config_LoRaConfig)) device.Change {
+	l := proto.Clone(remoteBefore().Config.Lora).(*pb.Config_LoRaConfig)
+	f(l)
+	return device.Change{Config: &pb.Config{PayloadVariant: &pb.Config_Lora{Lora: l}}}
+}
+
+var myKey = bytes.Repeat([]byte{7}, 32)
+
+func TestRemoteRisksLoraLink(t *testing.T) {
+	for name, f := range map[string]func(*pb.Config_LoRaConfig){
+		"lora.region":       func(l *pb.Config_LoRaConfig) { l.Region = pb.Config_LoRaConfig_US },
+		"lora.modem_preset": func(l *pb.Config_LoRaConfig) { l.ModemPreset = pb.Config_LoRaConfig_SHORT_FAST },
+		"lora.use_preset":   func(l *pb.Config_LoRaConfig) { l.UsePreset = false },
+		"lora.channel_num":  func(l *pb.Config_LoRaConfig) { l.ChannelNum = 5 },
+		"lora.tx_enabled":   func(l *pb.Config_LoRaConfig) { l.TxEnabled = false },
+	} {
+		risks := device.RemoteRisks(remoteBefore(), myKey, []device.Change{loraWith(f)})
+		if len(risks) != 1 || !strings.Contains(risks[0], name) {
+			t.Error(name, risks)
+		}
+	}
+}
+
+func TestRemoteRisksPrimaryChannel(t *testing.T) {
+	ch := &pb.Channel{Index: 0, Role: pb.Channel_PRIMARY, Settings: &pb.ChannelSettings{Psk: []byte{2}}}
+	if risks := device.RemoteRisks(remoteBefore(), myKey, []device.Change{{Channel: ch}}); len(risks) != 1 || !strings.Contains(risks[0], "channel[0]") {
+		t.Fatal(risks)
+	}
+	secondary := &pb.Channel{Index: 1, Role: pb.Channel_SECONDARY, Settings: &pb.ChannelSettings{Name: "ops"}}
+	if risks := device.RemoteRisks(remoteBefore(), myKey, []device.Change{{Channel: secondary}}); len(risks) != 0 {
+		t.Fatal(risks)
+	}
+}
+
+func TestRemoteRisksAdminKeyRemoved(t *testing.T) {
+	sec := &pb.Config_SecurityConfig{AdminKey: [][]byte{bytes.Repeat([]byte{8}, 32)}}
+	risks := device.RemoteRisks(remoteBefore(), myKey, []device.Change{{Config: &pb.Config{PayloadVariant: &pb.Config_Security{Security: sec}}}})
+	if len(risks) != 1 || !strings.Contains(risks[0], "admin_key") {
+		t.Fatal(risks)
+	}
+	sec.AdminKey = append(sec.AdminKey, myKey)
+	if risks := device.RemoteRisks(remoteBefore(), myKey, []device.Change{{Config: &pb.Config{PayloadVariant: &pb.Config_Security{Security: sec}}}}); len(risks) != 0 {
+		t.Fatal(risks)
+	}
+}
+
+func TestRemoteRisksQuietForSafeChange(t *testing.T) {
+	if risks := device.RemoteRisks(remoteBefore(), myKey, []device.Change{loraWith(func(l *pb.Config_LoRaConfig) { l.HopLimit = 5 })}); len(risks) != 0 {
+		t.Fatal(risks)
 	}
 }
