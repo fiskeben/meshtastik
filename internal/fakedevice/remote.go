@@ -329,7 +329,6 @@ var moduleSections = map[pb.AdminMessage_ModuleConfigType]string{
 	pb.AdminMessage_DETECTIONSENSOR_CONFIG:   "detection_sensor",
 	pb.AdminMessage_TRAFFICMANAGEMENT_CONFIG: "traffic_management",
 	pb.AdminMessage_MESHBEACON_CONFIG:        "mesh_beacon",
-	pb.AdminMessage_STATUSMESSAGE_CONFIG:     "status_message",
 }
 
 // moduleSection answers get_module_config_request for type t.

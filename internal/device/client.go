@@ -28,6 +28,8 @@ type State struct {
 	Config       *pb.LocalConfig
 	ModuleConfig *pb.LocalModuleConfig
 	Channels     [8]*pb.Channel
+
+	remote bool // read from a remote node over the mesh (see Remote.Fetch)
 }
 
 // Self returns the NodeInfo of the connected node, or nil if unknown.
@@ -47,6 +49,7 @@ func (s *State) clone() *State {
 		Nodes:        make(map[uint32]*pb.NodeInfo, len(s.Nodes)),
 		Config:       proto.Clone(s.Config).(*pb.LocalConfig),
 		ModuleConfig: proto.Clone(s.ModuleConfig).(*pb.LocalModuleConfig),
+		remote:       s.remote,
 	}
 	if s.MyInfo != nil {
 		out.MyInfo = proto.Clone(s.MyInfo).(*pb.MyNodeInfo)
@@ -73,7 +76,10 @@ type Options struct {
 	RebootGrace       time.Duration // default 3s: wait after a commit for the node to reboot
 	MeshTimeout       time.Duration // default 30s: wait for each answer from another node over the mesh
 	RebootWait        time.Duration // default 15s: wait for a reboot the node schedules (firmware: ~7 s after a node list reset)
-	Log               io.Writer     // default io.Discard
+	// OnProgress, when set, is called with each part ("lora", "mqtt",
+	// "channel 3", "owner") as Remote.Fetch reads it over the mesh.
+	OnProgress func(part string)
+	Log        io.Writer // default io.Discard
 
 	// Listen's handling of dropped links (see Listen).
 	StableLink     time.Duration // default 60s: a link that lived shorter counts as short-lived when it drops

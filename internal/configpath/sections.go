@@ -29,6 +29,12 @@ func sectionNames(d protoreflect.MessageDescriptor) []string {
 	return out
 }
 
+// ConfigSectionNames returns the section names of LocalConfig ("device", "lora", …).
+func ConfigSectionNames() []string { return sectionNames(configDesc()) }
+
+// ModuleSectionNames returns the section names of LocalModuleConfig ("mqtt", …).
+func ModuleSectionNames() []string { return sectionNames(moduleDesc()) }
+
 // Sections returns every section name of LocalConfig and LocalModuleConfig, sorted.
 func Sections() []string {
 	s := append(sectionNames(configDesc()), sectionNames(moduleDesc())...)

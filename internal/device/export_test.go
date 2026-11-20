@@ -4,4 +4,6 @@ package device
 var (
 	AdminRequestTo = (*Client).adminRequestTo
 	PostTo         = (*Client).postTo
+
+	ConfigSectionsWithoutEnum = sectionsWithoutEnum
 )
