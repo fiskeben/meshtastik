@@ -264,25 +264,38 @@ func (c *Client) awaitNode(ctx context.Context) error {
 	return c.reconnect(ctx, afterReboot)
 }
 
-func (c *Client) sessionPasskey() []byte {
+// localNum is the connected node's number.
+func (c *Client) localNum() uint32 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.passkey
+	return c.state.MyInfo.GetMyNodeNum()
 }
 
-func (c *Client) setPasskey(b []byte) {
+func (c *Client) sessionPasskey(node uint32) []byte {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.passkey = b
+	return c.passkeys[node]
 }
 
-// ensurePasskey fetches the admin session passkey unless one is held.
+func (c *Client) setPasskey(node uint32, b []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.passkeys[node] = b
+}
+
+// ensurePasskey fetches the connected node's admin session passkey unless
+// one is held.
 func (c *Client) ensurePasskey(ctx context.Context) error {
-	if len(c.sessionPasskey()) > 0 {
+	return c.ensurePasskeyFor(ctx, c.localNum())
+}
+
+// ensurePasskeyFor fetches node's admin session passkey unless one is held.
+func (c *Client) ensurePasskeyFor(ctx context.Context, node uint32) error {
+	if len(c.sessionPasskey(node)) > 0 {
 		return nil
 	}
 	req := &pb.AdminMessage{PayloadVariant: &pb.AdminMessage_GetConfigRequest{GetConfigRequest: pb.AdminMessage_SESSIONKEY_CONFIG}}
-	if _, err := c.AdminRequest(ctx, req); err != nil {
+	if _, err := c.adminRequestTo(ctx, node, req); err != nil {
 		return fmt.Errorf("get session passkey: %w", err)
 	}
 	return nil
@@ -290,15 +303,13 @@ func (c *Client) ensurePasskey(ctx context.Context) error {
 
 // sendAdmin sends m, stamped with the session passkey, to the local node.
 func (c *Client) sendAdmin(ctx context.Context, id uint32, m *pb.AdminMessage, wantResponse bool) error {
+	to := c.localNum()
 	m = proto.Clone(m).(*pb.AdminMessage)
-	m.SessionPasskey = c.sessionPasskey()
+	m.SessionPasskey = c.sessionPasskey(to)
 	payload, err := proto.Marshal(m)
 	if err != nil {
 		return fmt.Errorf("encode admin message: %w", err)
 	}
-	c.mu.Lock()
-	to := c.state.MyInfo.GetMyNodeNum()
-	c.mu.Unlock()
 	pkt := &pb.MeshPacket{
 		To:      to,
 		Id:      id,
@@ -312,13 +323,22 @@ func (c *Client) sendAdmin(ctx context.Context, id uint32, m *pb.AdminMessage, w
 	return c.send(ctx, &pb.ToRadio{PayloadVariant: &pb.ToRadio_Packet{Packet: pkt}})
 }
 
-// post sends an admin message that expects no response.
+// post sends an admin message that expects no response to the local node.
 func (c *Client) post(ctx context.Context, m *pb.AdminMessage) error {
 	return c.sendAdmin(ctx, randomID(), m, false)
 }
 
 // AdminRequest sends m to the local node and waits for its admin response.
 func (c *Client) AdminRequest(ctx context.Context, m *pb.AdminMessage) (*pb.AdminMessage, error) {
+	return c.adminRequestTo(ctx, c.localNum(), m)
+}
+
+// adminRequestTo sends m to node to and waits for its admin response: the
+// connected node directly, another node over the mesh (see remoteAdminRequest).
+func (c *Client) adminRequestTo(ctx context.Context, to uint32, m *pb.AdminMessage) (*pb.AdminMessage, error) {
+	if to != c.localNum() {
+		return c.remoteAdminRequest(ctx, to, m)
+	}
 	id := randomID()
 	responses := c.addWaiter(id)
 	defer c.removeWaiter(id)
@@ -339,7 +359,7 @@ func (c *Client) AdminRequest(ctx context.Context, m *pb.AdminMessage) (*pb.Admi
 					return nil, fmt.Errorf("decode admin response: %w", err)
 				}
 				if len(resp.SessionPasskey) > 0 {
-					c.setPasskey(resp.SessionPasskey)
+					c.setPasskey(to, resp.SessionPasskey)
 				}
 				return resp, nil
 			case pb.PortNum_ROUTING_APP:
@@ -356,6 +376,15 @@ func (c *Client) AdminRequest(ctx context.Context, m *pb.AdminMessage) (*pb.Admi
 			return nil, ctx.Err()
 		}
 	}
+}
+
+// postTo sends an admin message that expects no response to node to: the
+// connected node directly, another node over the mesh (see remotePost).
+func (c *Client) postTo(ctx context.Context, to uint32, m *pb.AdminMessage) error {
+	if to != c.localNum() {
+		return c.remotePost(ctx, to, m)
+	}
+	return c.post(ctx, m)
 }
 
 // action sends a single admin command, with the session passkey, unverified.

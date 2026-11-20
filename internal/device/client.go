@@ -213,9 +213,9 @@ type Client struct {
 	cur    *link
 	closed bool
 
-	mu      sync.Mutex // guards state and passkey
-	state   *State
-	passkey []byte // admin session passkey, refreshed from admin responses
+	mu       sync.Mutex // guards state and passkeys
+	state    *State
+	passkeys map[uint32][]byte // admin session passkey per node, refreshed from its admin responses
 
 	wmu     sync.Mutex
 	waiters map[uint32]chan *pb.MeshPacket // by request id
@@ -234,11 +234,12 @@ func Open(ctx context.Context, dial transport.Dialer, opts Options) (*Client, er
 		return nil, err
 	}
 	c := &Client{
-		dial:    dial,
-		opts:    opts,
-		state:   newState(),
-		waiters: map[uint32]chan *pb.MeshPacket{},
-		packets: packetQueue{wake: make(chan struct{}, 1)},
+		dial:     dial,
+		opts:     opts,
+		state:    newState(),
+		passkeys: map[uint32][]byte{},
+		waiters:  map[uint32]chan *pb.MeshPacket{},
+		packets:  packetQueue{wake: make(chan struct{}, 1)},
 	}
 	l, err := c.attach(conn)
 	if err != nil {
@@ -377,7 +378,7 @@ func (c *Client) reconnect(ctx context.Context, after reconnectReason) error {
 	if l := c.current(); l != nil {
 		l.close()
 	}
-	c.setPasskey(nil) // the node makes a new session key on boot
+	c.setPasskey(c.localNum(), nil) // the node makes a new session key on boot
 	rctx, cancel := context.WithTimeout(ctx, c.opts.ReconnectTimeout)
 	defer cancel()
 	delay := reconnectBackoff

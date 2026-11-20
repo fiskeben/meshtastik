@@ -25,7 +25,7 @@ func withRemote(t *testing.T, setup func(*fakedevice.Device, *fakedevice.Remote)
 	if setup != nil {
 		setup(d, r)
 	}
-	c, err := openA(t, d, device.Options{MeshTimeout: time.Second})
+	c, err := openA(t, d, device.Options{MeshTimeout: 200 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}

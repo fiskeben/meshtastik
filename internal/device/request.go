@@ -65,10 +65,25 @@ type RequestOptions struct {
 // error from any node ends it; routing NONE replies (acks, implicit acks)
 // are skipped. Without an answer it fails with ErrNoAnswer after the timeout.
 func (c *Client) Request(ctx context.Context, to uint32, port pb.PortNum, payload proto.Message, o RequestOptions) (*pb.MeshPacket, error) {
+	return c.meshSend(ctx, to, port, payload, o, true)
+}
+
+// sendAcked sends payload to node to with want_ack and waits for to's
+// acknowledgement (routing NONE from to; implicit acks from others are
+// skipped). It fails like Request.
+func (c *Client) sendAcked(ctx context.Context, to uint32, port pb.PortNum, payload proto.Message, o RequestOptions) error {
+	o.WantAck = true
+	_, err := c.meshSend(ctx, to, port, payload, o, false)
+	return err
+}
+
+// meshSend sends payload to node to and waits for its answer (wantResponse)
+// or its acknowledgement.
+func (c *Client) meshSend(ctx context.Context, to uint32, port pb.PortNum, payload proto.Message, o RequestOptions, wantResponse bool) (*pb.MeshPacket, error) {
 	if to == 0 || to == Broadcast {
 		return nil, fmt.Errorf("!%08x is not a node to ask", to)
 	}
-	if to == c.State().MyInfo.GetMyNodeNum() {
+	if to == c.localNum() {
 		return nil, errors.New("cannot ask the connected node itself over the mesh")
 	}
 	b, err := proto.Marshal(payload)
@@ -89,7 +104,7 @@ func (c *Client) Request(ctx context.Context, to uint32, port pb.PortNum, payloa
 		PayloadVariant: &pb.MeshPacket_Decoded{Decoded: &pb.Data{
 			Portnum:      port,
 			Payload:      b,
-			WantResponse: true,
+			WantResponse: wantResponse,
 		}},
 	}
 	if err := c.send(ctx, &pb.ToRadio{PayloadVariant: &pb.ToRadio_Packet{Packet: pkt}}); err != nil {
@@ -112,9 +127,12 @@ func (c *Client) Request(ctx context.Context, to uint32, port pb.PortNum, payloa
 				if reason != pb.Routing_NONE {
 					return nil, &RoutingError{From: p.GetFrom(), Dest: to, Reason: reason}
 				}
+				if !wantResponse && p.GetFrom() == to {
+					return p, nil
+				}
 				continue
 			}
-			if p.GetFrom() != to || p.GetDecoded().GetPortnum() != port {
+			if !wantResponse || p.GetFrom() != to || p.GetDecoded().GetPortnum() != port {
 				continue
 			}
 			return p, nil
