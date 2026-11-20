@@ -173,3 +173,35 @@ func TestDestThroughDaemon(t *testing.T) {
 		t.Fatal(hill(d).Config.GetLora())
 	}
 }
+
+func TestDestConfigSetKeysRefused(t *testing.T) {
+	d := withHill(func(r *fakedevice.Remote) { r.FirmwareVersion = "2.8.2.d5f1619" })
+	for _, f := range []string{"security.private_key", "security.public_key"} {
+		_, _, err := runCLI(t, d, "y", "--dest", "HIL1", "config", "set", f, "base64:"+base64.StdEncoding.EncodeToString(make([]byte, 32)))
+		if err == nil || !strings.Contains(err.Error(), "cannot be set with --dest") || len(d.RemoteRequests(hillNum)) != 0 {
+			t.Fatal(f, err)
+		}
+	}
+}
+
+func TestDestNodesResetWithoutKeepAsks(t *testing.T) {
+	var prompts []string
+	confirm := func(p string) bool { prompts = append(prompts, p); return false }
+	if _, _, err := runCLICtx(t, context.Background(), withHill(nil), confirm, "--dest", "HIL1", "nodes", "reset"); err == nil ||
+		len(prompts) != 1 || !strings.Contains(prompts[0], "forgets this node's public key") {
+		t.Fatal(prompts, err)
+	}
+	prompts = nil
+	if _, _, err := runCLICtx(t, context.Background(), withHill(nil), confirm, "--dest", "HIL1", "nodes", "reset", "--keep-favorites"); err == nil ||
+		strings.Contains(strings.Join(prompts, ""), "forgets") {
+		t.Fatal(prompts, err)
+	}
+}
+
+func TestDestExportOmitsUnknownLocation(t *testing.T) {
+	d := withHill(func(r *fakedevice.Remote) { r.Config.Position.FixedPosition = true })
+	out, errOut, err := runCLI(t, d, "", "--dest", "HIL1", "config", "export")
+	if err != nil || strings.Contains(out, "location:") || !strings.Contains(errOut, "location omitted") {
+		t.Fatal(out, errOut, err)
+	}
+}

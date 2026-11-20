@@ -158,6 +158,9 @@ func newConfigSetCmd(a *app) *cobra.Command {
 				if err != nil {
 					return err
 				}
+				if a.dest != "" && p.Section == "security" && (p.Field == "private_key" || p.Field == "public_key") {
+					return fmt.Errorf("%s cannot be set with --dest: a node's keys must not be sent over the air", p)
+				}
 				paths = append(paths, p)
 			}
 			var want device.Want
@@ -250,6 +253,9 @@ func newConfigExportCmd(a *app) *cobra.Command {
 			}
 			if n.IsRemote() {
 				fmt.Fprintln(a.Stderr, "note: a remote node never sends its private key; the backup has none")
+				if st.Config.GetPosition().GetFixedPosition() {
+					fmt.Fprintln(a.Stderr, "note: location omitted: a remote node's fixed position cannot be read")
+				}
 			}
 			if out == "" {
 				_, err = a.Stdout.Write(data)

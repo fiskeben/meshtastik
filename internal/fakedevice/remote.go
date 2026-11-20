@@ -40,6 +40,16 @@ type Remote struct {
 	// firmware, a lost want_ack packet ends in a local MAX_RETRANSMIT after
 	// the radio's retries; other packets vanish.
 	DropFirst int
+	// DropFirstFor, when set, limits DropFirst to admin messages whose type
+	// starts with it ("set_").
+	DropFirstFor string
+	// LossDelay is how long the local node takes to give up on a lost
+	// want_ack packet (its own retransmissions) before MAX_RETRANSMIT.
+	LossDelay time.Duration
+	// EditIdle: an edit transaction idle this long is committed (what it
+	// has) and closed when the next admin message arrives, as firmware 2.8
+	// does after 60 s.
+	EditIdle time.Duration
 	// DropAcks: handle, but lose this many acks. Firmware acks only packets
 	// no module answered (an answer is the ack). DropAcksFor, when set,
 	// limits this to admin messages whose type starts with it ("set_").
@@ -57,6 +67,7 @@ type Remote struct {
 	passkey   []byte
 	rotated   bool
 	open      bool               // edit transaction open
+	lastEdit  time.Time          // last admin message while open
 	pending   []*pb.AdminMessage // sets held until commit
 	downUntil time.Time
 	requests  []*pb.MeshPacket
@@ -128,7 +139,7 @@ func (d *Device) toRemote(l *link, p *pb.MeshPacket) {
 	d.mu.Lock()
 	r := d.Remotes[p.GetTo()]
 	r.requests = append(r.requests, proto.Clone(p).(*pb.MeshPacket))
-	out, latency := d.remoteAnswers(r, p), r.Latency
+	out, latency := d.remoteAnswers(r, p)
 	d.mu.Unlock()
 	if len(out) == 0 {
 		return
@@ -149,8 +160,37 @@ func retransmitted(reason pb.Routing_Error) bool {
 	return reason == pb.Routing_MAX_RETRANSMIT || reason == pb.Routing_TIMEOUT
 }
 
-// remoteAnswers works out what comes back for p; d.mu must be held.
-func (d *Device) remoteAnswers(r *Remote, p *pb.MeshPacket) []*pb.FromRadio {
+// adminType is the type of the admin message p carries ("set_config"), or "".
+func adminType(p *pb.MeshPacket) string {
+	if p.GetDecoded().GetPortnum() != pb.PortNum_ADMIN_APP {
+		return ""
+	}
+	var m pb.AdminMessage
+	if proto.Unmarshal(p.GetDecoded().GetPayload(), &m) != nil {
+		return ""
+	}
+	return oneofName(&m)
+}
+
+// remoteAnswers works out what comes back for p, and after how long; d.mu
+// must be held.
+func (d *Device) remoteAnswers(r *Remote, p *pb.MeshPacket) ([]*pb.FromRadio, time.Duration) {
+	out := d.remoteReplies(r, p)
+	if len(out) == 1 && out[0].GetPacket().GetFrom() == d.NodeNum && routingOf(out[0]) == pb.Routing_MAX_RETRANSMIT {
+		return out, r.LossDelay
+	}
+	return out, r.Latency
+}
+
+func routingOf(m *pb.FromRadio) pb.Routing_Error {
+	var r pb.Routing
+	if m.GetPacket().GetDecoded().GetPortnum() != pb.PortNum_ROUTING_APP || proto.Unmarshal(m.GetPacket().GetDecoded().GetPayload(), &r) != nil {
+		return pb.Routing_NONE
+	}
+	return r.GetErrorReason()
+}
+
+func (d *Device) remoteReplies(r *Remote, p *pb.MeshPacket) []*pb.FromRadio {
 	me, id, data := d.NodeNum, p.GetId(), p.GetDecoded()
 	lost := func() []*pb.FromRadio { // the packet never got there
 		if p.GetWantAck() {
@@ -166,7 +206,7 @@ func (d *Device) remoteAnswers(r *Remote, p *pb.MeshPacket) []*pb.FromRadio {
 		return []*pb.FromRadio{routingReply(me, me, id, r.FailWith)}
 	case time.Now().Before(r.downUntil):
 		return lost()
-	case r.DropFirst > 0:
+	case r.DropFirst > 0 && strings.HasPrefix(adminType(p), r.DropFirstFor):
 		r.DropFirst--
 		return lost()
 	}
@@ -283,6 +323,15 @@ func randomPasskey() []byte {
 // be held.
 func (d *Device) remoteAdmin(r *Remote, m *pb.AdminMessage) *pb.AdminMessage {
 	nc := r.config()
+	if r.open && r.EditIdle > 0 && time.Since(r.lastEdit) > r.EditIdle { // abandoned: commit what it has
+		for _, s := range r.pending {
+			nc.apply(s)
+		}
+		r.open, r.pending = false, nil
+	}
+	if r.open {
+		r.lastEdit = time.Now()
+	}
 	switch v := m.PayloadVariant.(type) {
 	case *pb.AdminMessage_GetOwnerRequest:
 		return &pb.AdminMessage{PayloadVariant: &pb.AdminMessage_GetOwnerResponse{GetOwnerResponse: proto.Clone(r.Owner).(*pb.User)}}
@@ -300,7 +349,7 @@ func (d *Device) remoteAdmin(r *Remote, m *pb.AdminMessage) *pb.AdminMessage {
 	case *pb.AdminMessage_GetChannelRequest:
 		return &pb.AdminMessage{PayloadVariant: &pb.AdminMessage_GetChannelResponse{GetChannelResponse: nc.channel(v.GetChannelRequest)}}
 	case *pb.AdminMessage_BeginEditSettings:
-		r.open, r.pending = true, nil
+		r.open, r.pending, r.lastEdit = true, nil, time.Now()
 	case *pb.AdminMessage_CommitEditSettings:
 		for _, s := range r.pending {
 			nc.apply(s)

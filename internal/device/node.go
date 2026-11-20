@@ -1,6 +1,7 @@
 package device
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -208,7 +209,10 @@ var (
 )
 
 // remoteTarget writes to a remote node over the mesh.
-type remoteTarget struct{ r *Remote }
+type remoteTarget struct {
+	r    *Remote
+	sent []*pb.AdminMessage // sets sent since begin_edit_settings
+}
 
 // want is what must be read to compare changes.
 func want(changes []Change) Want {
@@ -235,22 +239,57 @@ func want(changes []Change) Want {
 	return w
 }
 
-func (t remoteTarget) current(ctx context.Context, changes []Change) (*State, error) {
+func (t *remoteTarget) current(ctx context.Context, changes []Change) (*State, error) {
 	return t.r.Fetch(ctx, want(changes))
 }
 
-func (t remoteTarget) ensurePasskey(ctx context.Context) error {
+func (t *remoteTarget) ensurePasskey(ctx context.Context) error {
 	return t.r.c.ensurePasskeyFor(ctx, t.r.num)
 }
 
-func (t remoteTarget) post(ctx context.Context, m *pb.AdminMessage) error {
-	return t.r.c.remotePost(ctx, t.r.num, m)
+// post sends m. When delivering a set took retries or a new session key,
+// the edit transaction may be gone: firmware 2.8 commits and closes one
+// idle for 60 s (when the next admin message arrives), and a reboot drops
+// it. So post opens a new one and sends every set again; sets are
+// idempotent and a repeated begin is harmless.
+func (t *remoteTarget) post(ctx context.Context, m *pb.AdminMessage) error {
+	send := func(m *pb.AdminMessage) (bool, error) { return t.r.c.remotePostReport(ctx, t.r.num, m) }
+	disturbed, err := send(m)
+	if err != nil {
+		return err
+	}
+	switch m.PayloadVariant.(type) {
+	case *pb.AdminMessage_BeginEditSettings:
+		t.sent = nil
+		return nil
+	case *pb.AdminMessage_CommitEditSettings:
+		return nil
+	}
+	t.sent = append(t.sent, m)
+	begin := &pb.AdminMessage{PayloadVariant: &pb.AdminMessage_BeginEditSettings{BeginEditSettings: true}}
+	for round := 0; disturbed; round++ {
+		if round == meshAttempts {
+			return errors.New("the edit kept being disturbed on the way; the node may hold part of it")
+		}
+		if disturbed, err = send(begin); err != nil {
+			return err
+		}
+		for _, s := range t.sent {
+			d, err := send(s)
+			if err != nil {
+				return err
+			}
+			disturbed = disturbed || d
+		}
+	}
+	return nil
 }
 
-// settle gives the node RebootGrace, then reads back what changed, retrying
-// while the node does not answer (it may be rebooting) until
-// ReconnectTimeout.
-func (t remoteTarget) settle(ctx context.Context, changes []Change) (*State, error) {
+// settle gives the node RebootGrace, then waits up to ReconnectTimeout for
+// it to answer again (it may be rebooting), then reads back what changed
+// with the usual per-request retries: the deadline covers coming back, not
+// how long reading many parts over the mesh takes.
+func (t *remoteTarget) settle(ctx context.Context, changes []Change) (*State, error) {
 	c := t.r.c
 	if err := sleep(ctx, c.opts.RebootGrace); err != nil {
 		return nil, err
@@ -258,10 +297,11 @@ func (t remoteTarget) settle(ctx context.Context, changes []Change) (*State, err
 	rctx, cancel := context.WithTimeout(ctx, c.opts.ReconnectTimeout)
 	defer cancel()
 	delay := c.opts.ReconnectDelay
+	probe := &pb.AdminMessage{PayloadVariant: &pb.AdminMessage_GetDeviceMetadataRequest{GetDeviceMetadataRequest: true}}
 	for {
-		st, err := t.r.Fetch(rctx, want(changes))
+		_, err := c.adminRequestTo(rctx, t.r.num, probe)
 		if err == nil {
-			return st, nil
+			break
 		}
 		var re *RoutingError
 		if !errors.Is(err, ErrNoAnswer) && !errors.As(err, &re) && rctx.Err() == nil {
@@ -276,6 +316,7 @@ func (t remoteTarget) settle(ctx context.Context, changes []Change) (*State, err
 		}
 		delay = min(delay*2, maxReconnectBackoff)
 	}
+	return t.r.Fetch(ctx, want(changes))
 }
 
 // sleep waits d or until ctx ends.
@@ -305,12 +346,27 @@ func (r *Remote) keysSafe() bool {
 // ErrCoordinatesUnverified.
 func (r *Remote) Apply(ctx context.Context, changes []Change) (int, error) {
 	for _, ch := range changes {
+		sec := ch.Config.GetSecurity()
+		if sec == nil {
+			continue
+		}
+		if len(sec.GetPrivateKey()) > 0 {
+			return 0, errors.New("a private key must not be sent over the air; set it over a local connection")
+		}
+		r.c.mu.Lock()
+		known := r.c.state.Nodes[r.num].GetUser().GetPublicKey()
+		r.c.mu.Unlock()
+		if len(sec.GetPublicKey()) > 0 && !bytes.Equal(sec.GetPublicKey(), known) {
+			return 0, errors.New("security.public_key cannot be changed remotely: it is derived from the node's private key")
+		}
+	}
+	for _, ch := range changes {
 		if ch.Config.GetSecurity() != nil && !r.keysSafe() {
 			return 0, fmt.Errorf("!%08x runs firmware %s; firmware older than 2.8 would replace or clear its keys when "+
 				"the security section is written remotely — change it over a local connection", r.num, r.meta.GetFirmwareVersion())
 		}
 	}
-	n, err := r.c.apply(ctx, remoteTarget{r}, changes)
+	n, err := r.c.apply(ctx, &remoteTarget{r: r}, changes)
 	if err != nil {
 		return n, err
 	}
@@ -350,6 +406,11 @@ func (r *Remote) FactoryReset(ctx context.Context, full bool) error {
 func (r *Remote) EditNodeDB(ctx context.Context, op NodeOp, num uint32) error {
 	if num == r.num {
 		return fmt.Errorf("cannot %s a node in its own node list", op)
+	}
+	if num == r.c.localNum() && (op == Ignore || op == RemoveNode) {
+		// An ignored node's packets are dropped, so the unignore could never
+		// arrive; a removed one loses the public key admin is encrypted with.
+		return fmt.Errorf("cannot %s the connected node on !%08x: that would cut off remote admin", op, r.num)
 	}
 	if err := r.post(ctx, op.admin(num)); err != nil {
 		return err

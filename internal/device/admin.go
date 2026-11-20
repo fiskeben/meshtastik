@@ -47,6 +47,10 @@ func (e *VerifyError) Error() string {
 	return b.String()
 }
 
+// ErrCommitUnconfirmed means the commit of an edit was sent over the mesh but
+// never acknowledged: the node may well have saved the changes.
+var ErrCommitUnconfirmed = errors.New("commit sent but not acknowledged; the node may have saved the changes — check with config get")
+
 // ErrPartialEdit means an edit transaction was begun but not committed.
 var ErrPartialEdit = errors.New("edit interrupted before commit; firmware 2.8 and newer saves what it received after 60 s, older firmware holds it until reboot — check with config get")
 
@@ -227,7 +231,9 @@ func (c *Client) apply(ctx context.Context, t adminTarget, changes []Change) (ap
 	}
 	var todo []Change
 	for _, ch := range changes {
-		if len(ch.diff(st)) > 0 {
+		// A remote node's coordinates cannot be read, so a fixed position
+		// is never known to be in place already.
+		if len(ch.diff(st)) > 0 || st.remote && ch.FixedPosition != nil {
 			todo = append(todo, ch)
 		}
 	}
@@ -255,6 +261,9 @@ func (c *Client) apply(ctx context.Context, t adminTarget, changes []Change) (ap
 	}
 	commit := &pb.AdminMessage{PayloadVariant: &pb.AdminMessage_CommitEditSettings{CommitEditSettings: true}}
 	if err := t.post(ctx, commit); err != nil {
+		if lostOnTheWay(err) { // sent at least once; only its acknowledgement is missing
+			return 0, fmt.Errorf("%w: %v", ErrCommitUnconfirmed, err)
+		}
 		return partial(err)
 	}
 	if st, err = t.settle(ctx, todo); err != nil {

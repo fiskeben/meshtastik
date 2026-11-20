@@ -43,29 +43,30 @@ func lostOnTheWay(err error) bool {
 
 // meshRetry runs try up to meshAttempts times while its packet is lost on
 // the way. When node to rejects the session passkey, it fetches a new one
-// and tries once more.
-func (c *Client) meshRetry(ctx context.Context, to uint32, try func() error) error {
+// and tries once more. disturbed reports whether it took more than one try:
+// time passed, and the node may have rebooted.
+func (c *Client) meshRetry(ctx context.Context, to uint32, try func() error) (disturbed bool, err error) {
 	refreshed := false
-	var err error
 	for attempt := 0; attempt < meshAttempts; {
 		err = try()
 		var re *RoutingError
 		switch {
 		case err == nil:
-			return nil
+			return disturbed, nil
 		case lostOnTheWay(err):
 			attempt++
 		case errors.As(err, &re) && re.Reason == pb.Routing_ADMIN_BAD_SESSION_KEY && !refreshed:
 			refreshed = true
 			c.setPasskey(to, nil)
 			if err := c.ensurePasskeyFor(ctx, to); err != nil {
-				return err
+				return true, err
 			}
 		default:
-			return err
+			return disturbed, err
 		}
+		disturbed = true
 	}
-	return fmt.Errorf("%w (tried %d times)", err, meshAttempts)
+	return true, fmt.Errorf("%w (tried %d times)", err, meshAttempts)
 }
 
 // remoteAdminRequest sends m to node to over the mesh, PKI-encrypted with
@@ -75,7 +76,7 @@ func (c *Client) remoteAdminRequest(ctx context.Context, to uint32, m *pb.AdminM
 		return nil, err
 	}
 	var resp *pb.AdminMessage
-	err := c.meshRetry(ctx, to, func() error {
+	_, err := c.meshRetry(ctx, to, func() error {
 		p, err := c.Request(ctx, to, pb.PortNum_ADMIN_APP, c.stamped(to, m), RequestOptions{PKI: true, WantAck: true})
 		if err != nil {
 			return err
@@ -96,11 +97,18 @@ func (c *Client) remoteAdminRequest(ctx context.Context, to uint32, m *pb.AdminM
 // remotePost sends m to node to over the mesh, PKI-encrypted, and waits for
 // to's acknowledgement.
 func (c *Client) remotePost(ctx context.Context, to uint32, m *pb.AdminMessage) error {
+	_, err := c.remotePostReport(ctx, to, m)
+	return err
+}
+
+// remotePostReport is remotePost, also reporting whether delivery was
+// disturbed (see meshRetry).
+func (c *Client) remotePostReport(ctx context.Context, to uint32, m *pb.AdminMessage) (bool, error) {
 	if err := c.checkRemoteKey(to); err != nil {
-		return err
+		return false, err
 	}
 	if err := c.ensurePasskeyFor(ctx, to); err != nil {
-		return err
+		return false, err
 	}
 	return c.meshRetry(ctx, to, func() error {
 		return c.sendAcked(ctx, to, pb.PortNum_ADMIN_APP, c.stamped(to, m), RequestOptions{PKI: true})

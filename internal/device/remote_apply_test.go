@@ -9,6 +9,7 @@ import (
 	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
 	"google.golang.org/protobuf/proto"
 
+	"meshtastik/internal/configpath"
 	"meshtastik/internal/device"
 	"meshtastik/internal/fakedevice"
 )
@@ -63,12 +64,14 @@ func TestRemoteApplyVerified(t *testing.T) {
 func TestRemoteApplyRetriesLostAck(t *testing.T) {
 	n, d, r := remoteNode(t, fastMesh, nil)
 	ch := loraChange(t, n, 6)
-	d.Update(func() { r.DropAcks, r.DropAcksFor = 1, "set_" }) // the set is applied but its ack is lost: sent again
+	// The set is applied but its ack is lost: it is sent again, and since
+	// time passed the edit is reopened and replayed (begin, set) as well.
+	d.Update(func() { r.DropAcks, r.DropAcksFor = 1, "set_" })
 	if got, err := n.Apply(ctxT(t), []device.Change{ch}); err != nil || got != 1 {
 		t.Fatal(got, err)
 	}
 	ms := d.RemoteAdmin(hill)
-	if r.Config.GetLora().GetHopLimit() != 6 || count(ms, "begin_edit_settings") != 1 || count(ms, "set_config") != 2 {
+	if r.Config.GetLora().GetHopLimit() != 6 || count(ms, "begin_edit_settings") != 2 || count(ms, "set_config") != 3 {
 		t.Fatal(r.Config.GetLora(), count(ms, "begin_edit_settings"), count(ms, "set_config"))
 	}
 }
@@ -155,5 +158,113 @@ func TestRemoteEditNodeDBNotVerifiable(t *testing.T) {
 	}
 	if err := n.EditNodeDB(ctxT(t), device.RemoveNode, hill); err == nil || errors.Is(err, device.ErrNotVerifiable) {
 		t.Fatal("removed the node from itself:", err)
+	}
+}
+
+func TestRemoteApplyRefusesKeys(t *testing.T) {
+	n, d, _ := remoteNode(t, fastMesh, func(_ *fakedevice.Device, r *fakedevice.Remote) { r.FirmwareVersion = "2.8.2.d5f1619" })
+	st, err := n.Fetch(ctxT(t), device.Want{Config: []string{"security"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sec := proto.Clone(st.Config.GetSecurity()).(*pb.Config_SecurityConfig)
+	sec.PrivateKey = make([]byte, 32)
+	_, err = n.Apply(ctxT(t), []device.Change{{Config: &pb.Config{PayloadVariant: &pb.Config_Security{Security: sec}}}})
+	if err == nil || !strings.Contains(err.Error(), "private key must not be sent over the air") || count(d.RemoteAdmin(hill), "begin_edit_settings") != 0 {
+		t.Fatal(err)
+	}
+	sec = proto.Clone(st.Config.GetSecurity()).(*pb.Config_SecurityConfig)
+	sec.PublicKey = make([]byte, 32)
+	if _, err = n.Apply(ctxT(t), []device.Change{{Config: &pb.Config{PayloadVariant: &pb.Config_Security{Security: sec}}}}); err == nil || !strings.Contains(err.Error(), "public_key") {
+		t.Fatal(err)
+	}
+}
+
+func TestRemoteEditNodeDBRefusesTheConnectedNode(t *testing.T) {
+	n, d, _ := remoteNode(t, fastMesh, nil)
+	before := len(d.RemoteAdmin(hill))
+	for _, op := range []device.NodeOp{device.Ignore, device.RemoveNode} {
+		if err := n.EditNodeDB(ctxT(t), op, d.NodeNum); err == nil || errors.Is(err, device.ErrNotVerifiable) || !strings.Contains(err.Error(), "remote admin") {
+			t.Fatal(op, err)
+		}
+	}
+	if len(d.RemoteAdmin(hill)) != before {
+		t.Fatal("sent something")
+	}
+	if err := n.EditNodeDB(ctxT(t), device.Favorite, d.NodeNum); !errors.Is(err, device.ErrNotVerifiable) { // harmless
+		t.Fatal(err)
+	}
+}
+
+func TestRemoteFixedPositionIsNeverANoop(t *testing.T) {
+	n, d, _ := remoteNode(t, fastMesh, func(_ *fakedevice.Device, r *fakedevice.Remote) { r.Config.Position.FixedPosition = true })
+	pos := &pb.Position{LatitudeI: proto.Int32(5), LongitudeI: proto.Int32(6)}
+	got, err := n.Apply(ctxT(t), []device.Change{{FixedPosition: pos}})
+	ms := d.RemoteAdmin(hill)
+	if got != 1 || !errors.Is(err, device.ErrCoordinatesUnverified) || count(ms, "set_fixed_position") != 1 {
+		t.Fatal(got, err, count(ms, "set_fixed_position"))
+	}
+}
+
+func TestRemoteCommitUnacknowledged(t *testing.T) {
+	n, d, r := remoteNode(t, fastMesh, nil)
+	ch := loraChange(t, n, 5)
+	d.Update(func() { r.DropAcks, r.DropAcksFor = 3, "commit_" }) // every attempt's ack lost; the commit itself landed
+	_, err := n.Apply(ctxT(t), []device.Change{ch})
+	if !errors.Is(err, device.ErrCommitUnconfirmed) || errors.Is(err, device.ErrPartialEdit) || !strings.Contains(err.Error(), "config get") {
+		t.Fatal(err)
+	}
+	if r.Config.GetLora().GetHopLimit() != 5 {
+		t.Fatal("the commit did land", r.Config.GetLora())
+	}
+}
+
+func TestRemoteSettleReadsManyPartsPastTheDeadline(t *testing.T) {
+	o := fastMesh
+	o.MeshTimeout, o.ReconnectTimeout = 500*time.Millisecond, 150*time.Millisecond
+	n, _, _ := remoteNode(t, o, func(_ *fakedevice.Device, r *fakedevice.Remote) { r.Latency = 40 * time.Millisecond })
+	st, err := n.Fetch(ctxT(t), device.Want{Config: []string{"lora", "device", "position", "bluetooth", "display"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := proto.Clone(st.Config).(*pb.LocalConfig)
+	cfg.Lora.HopLimit, cfg.Device.LedHeartbeatDisabled, cfg.Position.GpsUpdateInterval = 6, true, 120
+	cfg.Bluetooth.FixedPin, cfg.Display.ScreenOnSecs = 123456, 30
+	cs, _ := configpath.Changes(st.Config, cfg, st.ModuleConfig, st.ModuleConfig)
+	var changes []device.Change
+	for _, c := range cs {
+		changes = append(changes, device.Change{Config: c})
+	}
+	// Reading five sections back takes ~200 ms, past the 150 ms reboot deadline.
+	if got, err := n.Apply(ctxT(t), changes); err != nil || got != 5 {
+		t.Fatal(got, err)
+	}
+}
+
+func TestRemoteEditTransactionSurvivesALostSet(t *testing.T) {
+	n, d, r := remoteNode(t, fastMesh, func(_ *fakedevice.Device, r *fakedevice.Remote) {
+		r.EditIdle, r.LossDelay = 60*time.Millisecond, 100*time.Millisecond
+	})
+	st, err := n.Fetch(ctxT(t), device.Want{Config: []string{"lora", "device"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := proto.Clone(st.Config).(*pb.LocalConfig)
+	cfg.Lora.HopLimit, cfg.Device.LedHeartbeatDisabled = 6, true
+	cs, _ := configpath.Changes(st.Config, cfg, st.ModuleConfig, st.ModuleConfig)
+	var changes []device.Change
+	for _, c := range cs {
+		changes = append(changes, device.Change{Config: c})
+	}
+	// The first set is lost; by the time its retry arrives the transaction
+	// has been idle past EditIdle and the node has closed it.
+	d.Update(func() { r.DropFirst, r.DropFirstFor = 1, "set_" })
+	if got, err := n.Apply(ctxT(t), changes); err != nil || got != 2 {
+		t.Fatal(got, err)
+	}
+	ms := d.RemoteAdmin(hill)
+	if count(ms, "begin_edit_settings") != 2 || count(ms, "set_config") != 3 || count(ms, "commit_edit_settings") != 1 {
+		t.Fatalf("begin %d set %d commit %d: the edit was not reopened and replayed",
+			count(ms, "begin_edit_settings"), count(ms, "set_config"), count(ms, "commit_edit_settings"))
 	}
 }

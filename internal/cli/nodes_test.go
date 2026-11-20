@@ -94,6 +94,7 @@ func TestNodesResetAsksAndReboots(t *testing.T) {
 	if _, _, err := runCLI(t, d, "n", "nodes", "reset"); err == nil {
 		t.Fatal("reset without confirmation")
 	}
+	d = carAndBus() // the declined run connected too
 	out, _, err := runCLI(t, d, "y", "nodes", "reset", "--keep-favorites")
 	if err != nil || !strings.Contains(out, "reboot") || !d.LastAdmin().GetNodedbReset() || d.Dials() != 2 {
 		t.Fatal(out, err, d.Dials())

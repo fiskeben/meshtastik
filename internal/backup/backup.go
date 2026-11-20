@@ -67,8 +67,7 @@ func Export(s *device.State) ([]byte, error) {
 			return nil, err
 		}
 	}
-	if s.Config.GetPosition().GetFixedPosition() {
-		p := s.Self().GetPosition()
+	if p := s.Self().GetPosition(); s.Config.GetPosition().GetFixedPosition() && p != nil { // unknown: no location rather than 0,0
 		loc := map[string]any{"lat": float64(p.GetLatitudeI()) / 1e7, "lon": float64(p.GetLongitudeI()) / 1e7, "alt": p.GetAltitude()}
 		if err := add("location", loc); err != nil {
 			return nil, err

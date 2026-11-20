@@ -82,14 +82,20 @@ func newNodesResetCmd(a *app) *cobra.Command {
 			"Nodes in the ROUTER, ROUTER_LATE or CLIENT_BASE role always keep their favourites.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := confirmOrAbort(cmd.Context(), a, "Reset the node list? The node reboots."); err != nil {
-				return err
-			}
 			c, n, _, err := a.target(cmd, device.Want{})
 			if err != nil {
 				return err
 			}
 			defer c.Close()
+			prompt := "Reset the node list? The node reboots."
+			if n.IsRemote() && !keep {
+				// The node favourites the node that administers it, so only a
+				// reset that keeps favourites keeps this node's key.
+				prompt += " Without --keep-favorites it forgets this node's public key: remote admin stops working until it hears this node again."
+			}
+			if err := confirmOrAbort(cmd.Context(), a, prompt); err != nil {
+				return err
+			}
 			err = n.ResetNodeDB(cmd.Context(), keep)
 			if errors.Is(err, device.ErrNotVerifiable) {
 				_, err = fmt.Fprintln(a.Stdout, "Node list reset sent; the node reboots (a remote node list cannot be read back).")
