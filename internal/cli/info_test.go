@@ -69,7 +69,7 @@ func TestInfoShowsPublicKey(t *testing.T) {
 	d.Config.Security.PublicKey = key
 	want := "base64:" + base64.StdEncoding.EncodeToString(key)
 	out, _, err := runCLI(t, d, "", "info")
-	if err != nil || !regexp.MustCompile(`(?m)^Public key:\s+` + regexp.QuoteMeta(want) + `$`).MatchString(out) {
+	if err != nil || !regexp.MustCompile(`(?m)^Public key:\s+`+regexp.QuoteMeta(want)+`$`).MatchString(out) {
 		t.Fatal(out, err)
 	}
 	out, _, err = runCLI(t, d, "", "--json", "info")

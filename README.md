@@ -77,6 +77,9 @@ Commands connect to the node through a background daemon. The first command star
 | `factory-reset [--full]` | Erase the node's configuration (`--full` also erases device state) |
 | `send <text> [--to node] [--channel n] [--ack-timeout d]` | Send a text message; `--to` takes a `!hex` id, number or name (default: broadcast) |
 | `listen [-f] [--channel n] [--json [--raw]] [--all] [--count n]` | Print the next received message and exit; `-f`/`--follow` keeps printing (the node's queued backlog, then new ones) until Ctrl-C; `--all` adds other packet types, `--count` exits after n messages, `--raw` adds the whole FromRadio message to each JSON line under `raw` |
+| `admin-key list` | List the public keys allowed to administer the node remotely, with the node each belongs to |
+| `admin-key add <key\|node>` | Allow a key (`base64:…`, or a node whose public key the node list knows); at most 3 |
+| `admin-key remove <key\|node\|index>` | Remove an admin key |
 | `traceroute <node> [--hop-limit n]` | Trace the route to a node and back with the SNR of each hop (default hop limit: the node's `lora.hop_limit`) |
 | `request position <node>` | Ask a node for its position |
 | `request telemetry <node> [--type device\|environment\|power\|local-stats]` | Ask a node for its telemetry |
