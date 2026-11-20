@@ -38,6 +38,7 @@ type Device struct {
 	AckError         pb.Routing_Error // error_reason of the AckTexts reply (default NONE)
 
 	RequirePasskey bool     // ignore non-get admin messages without the session passkey
+	IgnoreNodeOps  bool     // accept node list admin messages (favorite, ignore, remove) without applying them
 	IgnoreFields   []string // config paths whose new value is silently dropped when applied
 	// IgnoreFixedPositionCoords: set_fixed_position turns position.fixed_position
 	// on but keeps the old coordinates.

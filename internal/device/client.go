@@ -310,6 +310,9 @@ func (c *Client) handshake(ctx context.Context, l *link, timeout time.Duration, 
 
 func (c *Client) handshakeOnce(ctx context.Context, l *link, timeout time.Duration) error {
 	nonce, complete := l.startHandshake()
+	// The node sends its whole node list again; start afresh so removed
+	// nodes do not linger.
+	c.update(func(s *State) { s.Nodes = map[uint32]*pb.NodeInfo{} })
 	req := &pb.ToRadio{PayloadVariant: &pb.ToRadio_WantConfigId{WantConfigId: nonce}}
 	if err := l.send(ctx, req); err != nil {
 		return fmt.Errorf("start handshake: %w", err)

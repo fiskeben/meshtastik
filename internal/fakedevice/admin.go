@@ -2,6 +2,7 @@ package fakedevice
 
 import (
 	"bytes"
+	"slices"
 	"strings"
 
 	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
@@ -62,6 +63,10 @@ func HasCommit(ms []*pb.AdminMessage) bool {
 	}
 	return false
 }
+
+// OneofName returns the name of the populated payload_variant field of m,
+// such as "set_config".
+func OneofName(m proto.Message) string { return oneofName(m) }
 
 // oneofName returns the name of the populated payload_variant field of m.
 func oneofName(m proto.Message) string {
@@ -126,6 +131,21 @@ func (d *Device) admin(st *linkState, m *pb.AdminMessage) (*pb.AdminMessage, boo
 		}
 		st.hung = d.HangOnCommit
 		return nil, d.RebootOnCommit
+	case *pb.AdminMessage_SetFavoriteNode, *pb.AdminMessage_RemoveFavoriteNode, *pb.AdminMessage_SetIgnoredNode,
+		*pb.AdminMessage_RemoveIgnoredNode, *pb.AdminMessage_RemoveByNodenum:
+		d.editNodes(m)
+	case *pb.AdminMessage_NodedbReset:
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		kept := d.ExtraNodes[:0]
+		for _, n := range d.ExtraNodes {
+			if v.NodedbReset && n.GetIsFavorite() {
+				kept = append(kept, n)
+			}
+		}
+		d.ExtraNodes = kept
+		d.rebooted = true
+		return nil, true
 	case *pb.AdminMessage_SetConfig, *pb.AdminMessage_SetModuleConfig, *pb.AdminMessage_SetChannel,
 		*pb.AdminMessage_SetOwner, *pb.AdminMessage_SetFixedPosition:
 		if st.open {
@@ -135,6 +155,44 @@ func (d *Device) admin(st *linkState, m *pb.AdminMessage) (*pb.AdminMessage, boo
 		}
 	}
 	return nil, false
+}
+
+// editNodes applies a node list admin message to ExtraNodes, unless
+// IgnoreNodeOps is set.
+func (d *Device) editNodes(m *pb.AdminMessage) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.IgnoreNodeOps {
+		return
+	}
+	find := func(num uint32) *pb.NodeInfo {
+		for _, n := range d.ExtraNodes {
+			if n.GetNum() == num {
+				return n
+			}
+		}
+		return nil
+	}
+	switch v := m.PayloadVariant.(type) {
+	case *pb.AdminMessage_SetFavoriteNode:
+		if n := find(v.SetFavoriteNode); n != nil {
+			n.IsFavorite = true
+		}
+	case *pb.AdminMessage_RemoveFavoriteNode:
+		if n := find(v.RemoveFavoriteNode); n != nil {
+			n.IsFavorite = false
+		}
+	case *pb.AdminMessage_SetIgnoredNode:
+		if n := find(v.SetIgnoredNode); n != nil {
+			n.IsIgnored = true
+		}
+	case *pb.AdminMessage_RemoveIgnoredNode:
+		if n := find(v.RemoveIgnoredNode); n != nil {
+			n.IsIgnored = false
+		}
+	case *pb.AdminMessage_RemoveByNodenum:
+		d.ExtraNodes = slices.DeleteFunc(d.ExtraNodes, func(n *pb.NodeInfo) bool { return n.GetNum() == v.RemoveByNodenum })
+	}
 }
 
 // reply sends resp as the answer to request packet req.
