@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"slices"
 	"strings"
+	"time"
 
 	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
 	"google.golang.org/protobuf/proto"
@@ -91,6 +92,16 @@ func (d *Device) handleAdmin(l *link, st *linkState, p *pb.MeshPacket, m *pb.Adm
 		if resp != nil && !d.reply(l, p, resp) {
 			return false
 		}
+		d.mu.Lock()
+		delay := d.RebootDelay
+		d.mu.Unlock()
+		if _, reset := m.PayloadVariant.(*pb.AdminMessage_NodedbReset); reboot && reset && delay > 0 {
+			time.AfterFunc(delay, func() {
+				l.emit(&pb.FromRadio{PayloadVariant: &pb.FromRadio_Rebooted{Rebooted: true}})
+				l.close()
+			})
+			return true
+		}
 		if reboot {
 			l.emit(&pb.FromRadio{PayloadVariant: &pb.FromRadio_Rebooted{Rebooted: true}})
 			return false
@@ -176,9 +187,11 @@ func (d *Device) editNodes(m *pb.AdminMessage) {
 		if n := find(v.RemoveFavoriteNode); n != nil {
 			n.IsFavorite = false
 		}
-	case *pb.AdminMessage_SetIgnoredNode:
+	case *pb.AdminMessage_SetIgnoredNode: // firmware 2.8 adds a node it has not heard yet
 		if n := find(v.SetIgnoredNode); n != nil {
 			n.IsIgnored = true
+		} else if v.SetIgnoredNode != d.NodeNum {
+			d.ExtraNodes = append(d.ExtraNodes, &pb.NodeInfo{Num: v.SetIgnoredNode, IsIgnored: true})
 		}
 	case *pb.AdminMessage_RemoveIgnoredNode:
 		if n := find(v.RemoveIgnoredNode); n != nil {

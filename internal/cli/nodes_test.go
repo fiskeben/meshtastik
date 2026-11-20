@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
 
@@ -107,6 +108,60 @@ func TestNodesThroughDaemon(t *testing.T) {
 	}
 	out, _, err := td.run(t, context.Background(), "nodes")
 	if err != nil || !strings.HasSuffix(strings.TrimSpace(row(out, "Car")), "fav") {
+		t.Fatal(out, err)
+	}
+}
+
+func TestNodesOpRefusesUnlistedNode(t *testing.T) {
+	for _, op := range []string{"remove", "favorite", "unfavorite", "unignore"} {
+		d := carAndBus()
+		_, _, err := runCLI(t, d, "y", "nodes", op, "!deadbeef")
+		if err == nil || !strings.Contains(err.Error(), "!deadbeef is not in the node list") {
+			t.Fatal(op, err)
+		}
+		if len(d.Received()) != 0 {
+			t.Fatal(op, "sent something")
+		}
+	}
+}
+
+func TestNodesIgnoreUnlistedNode(t *testing.T) {
+	d := carAndBus() // firmware 2.8 adds an ignored node it has not heard yet
+	out, _, err := runCLI(t, d, "", "nodes", "ignore", "!deadbeef")
+	if err != nil || !strings.Contains(out, "ignore !deadbeef: done") {
+		t.Fatal(out, err)
+	}
+	d = carAndBus()
+	d.IgnoreNodeOps = true // older firmware ignores only nodes it lists
+	_, _, err = runCLI(t, d, "", "nodes", "ignore", "!deadbeef")
+	if err == nil || !strings.Contains(err.Error(), "older firmware can only ignore nodes it already lists") {
+		t.Fatal(err)
+	}
+}
+
+func TestResolveNodePrefersNameOverUnlistedNumber(t *testing.T) {
+	d := fakedevice.New()
+	d.ExtraNodes = []*pb.NodeInfo{{Num: 99, User: &pb.User{LongName: "Base", ShortName: "0042"}}, {Num: 7, User: &pb.User{ShortName: "X"}}}
+	out, _, err := runCLI(t, d, "", "nodes", "favorite", "0042")
+	if err != nil || !strings.Contains(out, "!00000063") {
+		t.Fatal(out, err)
+	}
+	out, _, err = runCLI(t, d, "", "nodes", "favorite", "7") // a listed number still wins
+	if err != nil || !strings.Contains(out, "!00000007") {
+		t.Fatal(out, err)
+	}
+}
+
+func TestNodesResetThroughDaemon(t *testing.T) {
+	d := carAndBus()
+	d.RebootDelay = 200 * time.Millisecond
+	td := newTestDaemon(t, d)
+	out, _, err := td.run(t, context.Background(), "--yes", "nodes", "reset")
+	if err != nil || !strings.Contains(out, "rebooted") || d.Dials() != 2 {
+		t.Fatal(out, err, d.Dials())
+	}
+	out, _, err = td.run(t, context.Background(), "nodes")
+	if err != nil || strings.Contains(out, "Car") || !strings.Contains(out, "Test Node") {
 		t.Fatal(out, err)
 	}
 }

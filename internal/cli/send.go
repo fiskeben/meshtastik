@@ -14,8 +14,12 @@ import (
 	"meshtastik/internal/device"
 )
 
+// errNoNameMatch means no node has the queried name.
+var errNoNameMatch = errors.New("no name matches")
+
 // resolveNode turns a --to value into a node number: "!" and 8 hex digits,
-// a decimal number, or a unique short or long name (case-insensitive).
+// a decimal number, or a unique short or long name (case-insensitive). A
+// number that is not a listed node but is a node's name means that node.
 func resolveNode(s *device.State, q string) (uint32, error) {
 	if h, ok := strings.CutPrefix(q, "!"); ok && len(h) == 8 {
 		if n, err := strconv.ParseUint(h, 16, 32); err == nil {
@@ -23,8 +27,23 @@ func resolveNode(s *device.State, q string) (uint32, error) {
 		}
 	}
 	if n, err := strconv.ParseUint(q, 10, 32); err == nil {
+		if _, listed := s.Nodes[uint32(n)]; listed {
+			return uint32(n), nil
+		}
+		if num, err := resolveName(s, q); !errors.Is(err, errNoNameMatch) {
+			return num, err
+		}
 		return uint32(n), nil
 	}
+	num, err := resolveName(s, q)
+	if errors.Is(err, errNoNameMatch) {
+		return 0, fmt.Errorf("no node matches %q; use a node id (!1234abcd), number or name", q)
+	}
+	return num, err
+}
+
+// resolveName finds the node whose short name, or else long name, is q.
+func resolveName(s *device.State, q string) (uint32, error) {
 	for _, short := range []bool{true, false} {
 		var hits []uint32
 		for num, n := range s.Nodes {
@@ -52,7 +71,7 @@ func resolveNode(s *device.State, q string) (uint32, error) {
 		sort.Strings(names)
 		return 0, fmt.Errorf("%q is ambiguous: matches %s", q, strings.Join(names, ", "))
 	}
-	return 0, fmt.Errorf("no node matches %q; use a node id (!1234abcd), number or name", q)
+	return 0, errNoNameMatch
 }
 
 func newSendCmd(a *app) *cobra.Command {

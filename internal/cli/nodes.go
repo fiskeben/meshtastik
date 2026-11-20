@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -39,6 +40,11 @@ func newNodesOpCmd(a *app, op device.NodeOp, short string) *cobra.Command {
 				if nums[i], err = resolveNode(st, q); err != nil {
 					return err
 				}
+				// The firmware silently does nothing for a node it does not
+				// list; only ignore (2.8 and newer) adds the entry.
+				if _, listed := st.Nodes[nums[i]]; !listed && op != device.Ignore {
+					return fmt.Errorf("%s is not in the node list", nodeID(nums[i]))
+				}
 			}
 			if op == device.RemoveNode && len(nums) > 1 {
 				if err := confirmOrAbort(cmd.Context(), a, fmt.Sprintf("Remove %d nodes from the node list?", len(nums))); err != nil {
@@ -48,6 +54,10 @@ func newNodesOpCmd(a *app, op device.NodeOp, short string) *cobra.Command {
 			for _, num := range nums {
 				ref := nodeRef(st, num)
 				if err := c.EditNodeDB(cmd.Context(), op, num); err != nil {
+					var ve *device.VerifyError
+					if _, listed := st.Nodes[num]; !listed && errors.As(err, &ve) {
+						return fmt.Errorf("%s %s: %w (older firmware can only ignore nodes it already lists)", op, ref, err)
+					}
 					return fmt.Errorf("%s %s: %w", op, ref, err)
 				}
 				fmt.Fprintf(a.Stdout, "%s %s: done\n", op, ref)

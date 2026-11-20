@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"time"
 
 	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
 )
@@ -81,14 +82,27 @@ func (c *Client) EditNodeDB(ctx context.Context, op NodeOp, num uint32) error {
 }
 
 // ResetNodeDB clears the node list, keeping favourites if asked (nodes in a
-// router or base role always keep them); the node reboots.
+// router or base role always keep them). The node always reboots, a few
+// seconds later; ResetNodeDB waits up to Options.RebootWait for that and
+// reconnects.
 func (c *Client) ResetNodeDB(ctx context.Context, keepFavorites bool) error {
 	c.applyMu.Lock()
 	defer c.applyMu.Unlock()
+	l := c.current()
 	if err := c.action(ctx, &pb.AdminMessage{PayloadVariant: &pb.AdminMessage_NodedbReset{NodedbReset: keepFavorites}}); err != nil {
 		return err
 	}
-	if err := c.awaitNode(ctx); err != nil {
+	t := time.NewTimer(c.opts.RebootWait)
+	defer t.Stop()
+	select {
+	case <-l.rebooted:
+	case <-l.readerEnd:
+	case <-t.C:
+		return fmt.Errorf("node list reset sent, but the node did not reboot within %s", c.opts.RebootWait)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if err := c.reconnect(ctx, afterReboot); err != nil {
 		return fmt.Errorf("node list reset sent; waiting for the node to come back: %w", err)
 	}
 	return nil

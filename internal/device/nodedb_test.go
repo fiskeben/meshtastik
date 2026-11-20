@@ -2,7 +2,9 @@ package device_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
 
@@ -93,5 +95,27 @@ func TestResetNodeDB(t *testing.T) {
 	nodes := c.State().Nodes
 	if _, ok := nodes[42]; ok || nodes[43] == nil || nodes[d.NodeNum] == nil || len(nodes) != 2 {
 		t.Fatal(nodes)
+	}
+}
+
+func TestResetNodeDBWaitsForDelayedReboot(t *testing.T) {
+	d := withCar()
+	d.RebootDelay = 300 * time.Millisecond // firmware reboots ~7 s after a reset
+	c, _ := openA(t, d, device.Options{})  // RebootGrace 50ms: shorter than the delay
+	if err := c.ResetNodeDB(ctxT(t), false); err != nil {
+		t.Fatal(err)
+	}
+	if d.Dials() != 2 {
+		t.Fatalf("returned before the node rebooted (dials %d)", d.Dials())
+	}
+}
+
+func TestResetNodeDBWithoutReboot(t *testing.T) {
+	d := withCar()
+	d.RebootDelay = time.Hour
+	c, _ := openA(t, d, device.Options{RebootWait: 100 * time.Millisecond})
+	err := c.ResetNodeDB(ctxT(t), false)
+	if err == nil || !strings.Contains(err.Error(), "did not reboot within 100ms") {
+		t.Fatal(err)
 	}
 }

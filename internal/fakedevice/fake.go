@@ -46,9 +46,12 @@ type Device struct {
 	ImplicitAckTexts bool
 	AckError         pb.Routing_Error // error_reason of the AckTexts reply (default NONE)
 
-	RequirePasskey bool     // ignore non-get admin messages without the session passkey
-	IgnoreNodeOps  bool     // accept node list admin messages (favorite, ignore, remove) without applying them
-	IgnoreFields   []string // config paths whose new value is silently dropped when applied
+	RequirePasskey bool // ignore non-get admin messages without the session passkey
+	IgnoreNodeOps  bool // accept node list admin messages (favorite, ignore, remove) without applying them
+	// RebootDelay: a node list reset reboots this long after the request
+	// instead of at once (firmware waits ~7 s).
+	RebootDelay  time.Duration
+	IgnoreFields []string // config paths whose new value is silently dropped when applied
 	// IgnoreFixedPositionCoords: set_fixed_position turns position.fixed_position
 	// on but keeps the old coordinates.
 	IgnoreFixedPositionCoords bool
