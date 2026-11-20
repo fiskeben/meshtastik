@@ -48,7 +48,7 @@ func (e *VerifyError) Error() string {
 }
 
 // ErrPartialEdit means an edit transaction was begun but not committed.
-var ErrPartialEdit = errors.New("edit interrupted before commit; the node may hold a partial edit — reboot it to discard")
+var ErrPartialEdit = errors.New("edit interrupted before commit; firmware 2.8 and newer saves what it received after 60 s, older firmware holds it until reboot — check with config get")
 
 // section returns the section carried by a Config/ModuleConfig wrapper and
 // the matching section of the Local* message.

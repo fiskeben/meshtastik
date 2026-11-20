@@ -354,3 +354,10 @@ func TestManagedRefusal(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestPartialEditMessageExplainsAutoCommit(t *testing.T) {
+	msg := device.ErrPartialEdit.Error()
+	if !strings.Contains(msg, "60 s") || !strings.Contains(msg, "2.8") || strings.Contains(msg, "reboot it to discard") {
+		t.Fatal(msg)
+	}
+}

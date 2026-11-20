@@ -95,7 +95,7 @@ Run `meshtastik <command> --help` for details.
 - A node with `security.is_managed` set ignores local configuration, so meshtastik refuses changes to it, except turning `security.is_managed` off.
 - Changes that could cut the link in use (Bluetooth off or WiFi on over BLE, WiFi/network changes over TCP, the serial console off or taken over by the serial module over serial) ask for confirmation first.
 - `listen` has no history beyond what the daemon has kept: it shows the messages that arrived while no `listen` was running (or, with `--no-daemon`, the few the node queued while no client was connected), then live traffic. The node hands each message to one connected client only, so if Home Assistant or the phone app is connected at the same time they split the traffic. If the connection keeps dropping soon after each reconnect (another client taking the node's one TCP slot), `listen` gives up with an error.
-- Ctrl-C during a change: before the commit, meshtastik reports that the node may hold a partial edit (reboot the node to discard it); after the commit, it reports that the changes were committed but could not be verified. A second Ctrl-C exits at once.
+- Ctrl-C during a change: before the commit, meshtastik reports that the node may hold a partial edit (firmware 2.8 and newer saves the partial edit after 60 seconds; older firmware discards it on reboot); after the commit, it reports that the changes were committed but could not be verified. A second Ctrl-C exits at once.
 
 ## Bluetooth
 
