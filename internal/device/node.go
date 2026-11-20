@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
 	"google.golang.org/protobuf/proto"
@@ -200,11 +201,167 @@ func (r *Remote) Fetch(ctx context.Context, w Want) (*State, error) {
 	return st, nil
 }
 
-var errNotYet = errors.New("not supported for remote nodes yet")
+// Notes rather than failures: the CLI prints them after the result.
+var (
+	ErrCoordinatesUnverified = errors.New("fixed position set; its coordinates cannot be read back from a remote node")
+	ErrNotVerifiable         = errors.New("sent; a remote node list cannot be read back")
+)
 
-func (r *Remote) Apply(context.Context, []Change) (int, error)     { return 0, errNotYet }
-func (r *Remote) Reboot(context.Context, int32) error              { return errNotYet }
-func (r *Remote) Shutdown(context.Context, int32) error            { return errNotYet }
-func (r *Remote) FactoryReset(context.Context, bool) error         { return errNotYet }
-func (r *Remote) EditNodeDB(context.Context, NodeOp, uint32) error { return errNotYet }
-func (r *Remote) ResetNodeDB(context.Context, bool) error          { return errNotYet }
+// remoteTarget writes to a remote node over the mesh.
+type remoteTarget struct{ r *Remote }
+
+// want is what must be read to compare changes.
+func want(changes []Change) Want {
+	var w Want
+	for _, ch := range changes {
+		switch {
+		case ch.Config != nil:
+			name, _, _, _ := section(ch.Config.ProtoReflect(), (&pb.LocalConfig{}).ProtoReflect())
+			w.Config = append(w.Config, name)
+		case ch.ModuleConfig != nil:
+			name, _, _, _ := section(ch.ModuleConfig.ProtoReflect(), (&pb.LocalModuleConfig{}).ProtoReflect())
+			w.Modules = append(w.Modules, name)
+		case ch.Channel != nil:
+			w.Channels = true
+		case ch.Owner != nil:
+			w.Owner = true
+		case ch.FixedPosition != nil:
+			w.Config = append(w.Config, "position")
+		}
+	}
+	slices.Sort(w.Config)
+	slices.Sort(w.Modules)
+	w.Config, w.Modules = slices.Compact(w.Config), slices.Compact(w.Modules)
+	return w
+}
+
+func (t remoteTarget) current(ctx context.Context, changes []Change) (*State, error) {
+	return t.r.Fetch(ctx, want(changes))
+}
+
+func (t remoteTarget) ensurePasskey(ctx context.Context) error {
+	return t.r.c.ensurePasskeyFor(ctx, t.r.num)
+}
+
+func (t remoteTarget) post(ctx context.Context, m *pb.AdminMessage) error {
+	return t.r.c.remotePost(ctx, t.r.num, m)
+}
+
+// settle gives the node RebootGrace, then reads back what changed, retrying
+// while the node does not answer (it may be rebooting) until
+// ReconnectTimeout.
+func (t remoteTarget) settle(ctx context.Context, changes []Change) (*State, error) {
+	c := t.r.c
+	if err := sleep(ctx, c.opts.RebootGrace); err != nil {
+		return nil, err
+	}
+	rctx, cancel := context.WithTimeout(ctx, c.opts.ReconnectTimeout)
+	defer cancel()
+	delay := c.opts.ReconnectDelay
+	for {
+		st, err := t.r.Fetch(rctx, want(changes))
+		if err == nil {
+			return st, nil
+		}
+		var re *RoutingError
+		if !errors.Is(err, ErrNoAnswer) && !errors.As(err, &re) && rctx.Err() == nil {
+			return nil, err
+		}
+		c.setPasskey(t.r.num, nil) // a rebooted node has a new session key
+		if err := sleep(rctx, delay); err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, fmt.Errorf("!%08x did not answer within %s: %w", t.r.num, c.opts.ReconnectTimeout, err)
+		}
+		delay = min(delay*2, maxReconnectBackoff)
+	}
+}
+
+// sleep waits d or until ctx ends.
+func sleep(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// keysSafe reports whether the node keeps its keypair when its security
+// section is written without the private key (which a remote node never
+// sends): firmware 2.8 and newer. Older firmware makes a new keypair (2.7)
+// or stores the empty key (2.5, 2.6).
+func (r *Remote) keysSafe() bool {
+	maj, min, ok := parseFirmware(r.meta.GetFirmwareVersion())
+	return ok && (maj > 2 || maj == 2 && min >= 8)
+}
+
+// Apply writes the changes in one edit transaction over the mesh and
+// verifies them by reading them back. A fixed position is verified by
+// position.fixed_position only: it then returns the count with
+// ErrCoordinatesUnverified.
+func (r *Remote) Apply(ctx context.Context, changes []Change) (int, error) {
+	for _, ch := range changes {
+		if ch.Config.GetSecurity() != nil && !r.keysSafe() {
+			return 0, fmt.Errorf("!%08x runs firmware %s; firmware older than 2.8 would replace or clear its keys when "+
+				"the security section is written remotely — change it over a local connection", r.num, r.meta.GetFirmwareVersion())
+		}
+	}
+	n, err := r.c.apply(ctx, remoteTarget{r}, changes)
+	if err != nil {
+		return n, err
+	}
+	for _, ch := range changes {
+		if ch.FixedPosition != nil && n > 0 {
+			return n, ErrCoordinatesUnverified
+		}
+	}
+	return n, nil
+}
+
+func (r *Remote) post(ctx context.Context, m *pb.AdminMessage) error {
+	return r.c.remotePost(ctx, r.num, m)
+}
+
+// Reboot asks the node to reboot after seconds.
+func (r *Remote) Reboot(ctx context.Context, seconds int32) error {
+	return r.post(ctx, &pb.AdminMessage{PayloadVariant: &pb.AdminMessage_RebootSeconds{RebootSeconds: seconds}})
+}
+
+// Shutdown asks the node to power off after seconds.
+func (r *Remote) Shutdown(ctx context.Context, seconds int32) error {
+	return r.post(ctx, &pb.AdminMessage{PayloadVariant: &pb.AdminMessage_ShutdownSeconds{ShutdownSeconds: seconds}})
+}
+
+// FactoryReset erases the node's config (full: also its device state).
+func (r *Remote) FactoryReset(ctx context.Context, full bool) error {
+	m := &pb.AdminMessage{PayloadVariant: &pb.AdminMessage_FactoryResetConfig{FactoryResetConfig: 1}}
+	if full {
+		m.PayloadVariant = &pb.AdminMessage_FactoryResetDevice{FactoryResetDevice: 1}
+	}
+	return r.post(ctx, m)
+}
+
+// EditNodeDB applies op to node num in the remote node's node list. A
+// remote node list cannot be read, so success returns ErrNotVerifiable.
+func (r *Remote) EditNodeDB(ctx context.Context, op NodeOp, num uint32) error {
+	if num == r.num {
+		return fmt.Errorf("cannot %s a node in its own node list", op)
+	}
+	if err := r.post(ctx, op.admin(num)); err != nil {
+		return err
+	}
+	return ErrNotVerifiable
+}
+
+// ResetNodeDB clears the remote node's node list (it reboots). Success
+// returns ErrNotVerifiable.
+func (r *Remote) ResetNodeDB(ctx context.Context, keepFavorites bool) error {
+	if err := r.post(ctx, &pb.AdminMessage{PayloadVariant: &pb.AdminMessage_NodedbReset{NodedbReset: keepFavorites}}); err != nil {
+		return err
+	}
+	return ErrNotVerifiable
+}

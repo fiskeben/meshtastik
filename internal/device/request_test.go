@@ -18,6 +18,12 @@ const hill = 0x99
 // withRemote opens a client on a fake that can reach remote node hill.
 func withRemote(t *testing.T, setup func(*fakedevice.Device, *fakedevice.Remote)) (*device.Client, *fakedevice.Device, *fakedevice.Remote) {
 	t.Helper()
+	return withRemoteOpts(t, device.Options{MeshTimeout: 200 * time.Millisecond}, setup)
+}
+
+// withRemoteOpts is withRemote with client options.
+func withRemoteOpts(t *testing.T, o device.Options, setup func(*fakedevice.Device, *fakedevice.Remote)) (*device.Client, *fakedevice.Device, *fakedevice.Remote) {
+	t.Helper()
 	d := fakedevice.New()
 	r := fakedevice.NewRemote(hill, "Hill", "HIL1")
 	r.AdminKeys = [][]byte{d.PublicKey}
@@ -25,7 +31,7 @@ func withRemote(t *testing.T, setup func(*fakedevice.Device, *fakedevice.Remote)
 	if setup != nil {
 		setup(d, r)
 	}
-	c, err := openA(t, d, device.Options{MeshTimeout: 200 * time.Millisecond})
+	c, err := openA(t, d, o)
 	if err != nil {
 		t.Fatal(err)
 	}

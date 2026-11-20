@@ -135,6 +135,9 @@ func (ch Change) diff(s *State) []Mismatch {
 		if !s.Config.GetPosition().GetFixedPosition() {
 			out = append(out, Mismatch{Path: "position.fixed_position", Want: "true", Got: "false"})
 		}
+		if s.remote { // a remote node's coordinates cannot be read back
+			return out
+		}
 		cur := s.Self().GetPosition()
 		for _, f := range []struct {
 			path      string
@@ -185,12 +188,45 @@ func (ch Change) admin() *pb.AdminMessage {
 func (c *Client) Apply(ctx context.Context, changes []Change) (applied int, err error) {
 	c.applyMu.Lock()
 	defer c.applyMu.Unlock()
-	st := c.State()
-	var todo []Change
+	return c.apply(ctx, localTarget{c}, changes)
+}
+
+// adminTarget is what differs between writing to the connected node and to
+// a remote one; the edit transaction around it is shared (apply).
+type adminTarget interface {
+	// current returns the state the changes are compared against.
+	current(ctx context.Context, changes []Change) (*State, error)
+	ensurePasskey(ctx context.Context) error
+	post(ctx context.Context, m *pb.AdminMessage) error
+	// settle waits for the node after the commit and returns its state.
+	settle(ctx context.Context, changes []Change) (*State, error)
+}
+
+type localTarget struct{ c *Client }
+
+func (t localTarget) current(context.Context, []Change) (*State, error)  { return t.c.State(), nil }
+func (t localTarget) ensurePasskey(ctx context.Context) error            { return t.c.ensurePasskey(ctx) }
+func (t localTarget) post(ctx context.Context, m *pb.AdminMessage) error { return t.c.post(ctx, m) }
+func (t localTarget) settle(ctx context.Context, _ []Change) (*State, error) {
+	if err := t.c.awaitNode(ctx); err != nil {
+		return nil, err
+	}
+	return t.c.State(), nil
+}
+
+// apply is Apply's edit transaction against target t.
+func (c *Client) apply(ctx context.Context, t adminTarget, changes []Change) (applied int, err error) {
 	for i, ch := range changes {
 		if err := ch.validate(); err != nil {
 			return 0, fmt.Errorf("change %d: %w", i+1, err)
 		}
+	}
+	st, err := t.current(ctx, changes)
+	if err != nil {
+		return 0, err
+	}
+	var todo []Change
+	for _, ch := range changes {
 		if len(ch.diff(st)) > 0 {
 			todo = append(todo, ch)
 		}
@@ -198,19 +234,19 @@ func (c *Client) Apply(ctx context.Context, changes []Change) (applied int, err 
 	if len(todo) == 0 {
 		return 0, nil
 	}
-	if err := c.ensurePasskey(ctx); err != nil {
+	if err := t.ensurePasskey(ctx); err != nil {
 		return 0, err
 	}
 	begin := &pb.AdminMessage{PayloadVariant: &pb.AdminMessage_BeginEditSettings{BeginEditSettings: true}}
 	partial := func(cause error) (int, error) { return 0, fmt.Errorf("%w: %v", ErrPartialEdit, cause) }
-	if err := c.post(ctx, begin); err != nil {
+	if err := t.post(ctx, begin); err != nil {
 		return partial(fmt.Errorf("begin edit: %w", err))
 	}
 	for _, ch := range todo {
 		if err := ctx.Err(); err != nil {
 			return partial(err)
 		}
-		if err := c.post(ctx, ch.admin()); err != nil {
+		if err := t.post(ctx, ch.admin()); err != nil {
 			return partial(err)
 		}
 	}
@@ -218,13 +254,12 @@ func (c *Client) Apply(ctx context.Context, changes []Change) (applied int, err 
 		return partial(err)
 	}
 	commit := &pb.AdminMessage{PayloadVariant: &pb.AdminMessage_CommitEditSettings{CommitEditSettings: true}}
-	if err := c.post(ctx, commit); err != nil {
+	if err := t.post(ctx, commit); err != nil {
 		return partial(err)
 	}
-	if err := c.awaitNode(ctx); err != nil {
+	if st, err = t.settle(ctx, todo); err != nil {
 		return 0, fmt.Errorf("changes were committed but could not be verified: %w", err)
 	}
-	st = c.State()
 	var mismatches []Mismatch
 	for _, ch := range todo {
 		mismatches = append(mismatches, ch.diff(st)...)

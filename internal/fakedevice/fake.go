@@ -414,6 +414,14 @@ func (d *Device) handshake(l *link, nonce uint32) bool {
 	return true
 }
 
+// Update runs f under the device lock, for changing fields (including a
+// Remote's) while links are open.
+func (d *Device) Update(f func()) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	f()
+}
+
 // WantConfigs reports how many want_config requests the device has answered.
 func (d *Device) WantConfigs() int {
 	d.mu.Lock()
