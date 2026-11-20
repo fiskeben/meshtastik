@@ -187,7 +187,7 @@ func newAdminKeyCmd(a *app) *cobra.Command {
 			return applyChanges(cmd, a, c, n, target, []device.Change{securityChange(target, rest)})
 		},
 	}
-	supportsDest(list, add, remove)
+	supportsDest(list, changes(add, "yes"), changes(remove, "yes"))
 	cmd.AddCommand(list, add, remove)
 	return cmd
 }

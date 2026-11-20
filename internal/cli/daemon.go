@@ -40,8 +40,8 @@ func flagsFor(t daemon.Target) ConnFlags {
 
 // daemonDialer connects through the daemon, starting it if none answers.
 // Serial auto-detection runs here, so the daemon gets an explicit target.
-func (a *app) daemonDialer(backlog bool, timeout time.Duration) (transport.Dialer, error) {
-	kind, addr, err := chooseConn(a.conn, transport.DetectSerial)
+func (a *app) daemonDialer(conn ConnFlags, backlog bool, timeout time.Duration) (transport.Dialer, error) {
+	kind, addr, err := chooseConn(conn, transport.DetectSerial)
 	if err != nil {
 		return nil, err
 	}
@@ -249,6 +249,32 @@ func newDaemonRestartCmd(a *app) *cobra.Command {
 type daemonStatusJSON struct {
 	Running bool `json:"running"`
 	*daemon.Status
+	Links []linkJSON `json:"links,omitzero"` // wins over Status.Links
+}
+
+// linkJSON is a node connection with the names it has in the devices file.
+type linkJSON struct {
+	Device string `json:"device,omitempty"`
+	daemon.LinkStatus
+}
+
+// deviceNames maps each target in the devices file to its names, such as
+// "tcp:10.0.0.2" to "home". It is empty when the file cannot be read.
+func (a *app) deviceNames() map[string]string {
+	names := map[string]string{}
+	f, err := a.loadDevices()
+	if err != nil {
+		fmt.Fprintln(a.Stderr, "note: device names not shown:", err)
+		return names
+	}
+	for _, n := range f.Names() {
+		t := f.Devices[n].String()
+		if names[t] != "" {
+			names[t] += ","
+		}
+		names[t] += n
+	}
+	return names
 }
 
 func newDaemonStatusCmd(a *app) *cobra.Command {
@@ -268,8 +294,13 @@ func newDaemonStatusCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			names := a.deviceNames()
 			if a.asJSON {
-				return printJSON(a.Stdout, daemonStatusJSON{Running: true, Status: st})
+				links := make([]linkJSON, 0, len(st.Links))
+				for _, l := range st.Links {
+					links = append(links, linkJSON{Device: names[l.Target.String()], LinkStatus: l})
+				}
+				return printJSON(a.Stdout, daemonStatusJSON{Running: true, Status: st, Links: links})
 			}
 			now := time.Now()
 			idle := "never"
@@ -284,13 +315,13 @@ func newDaemonStatusCmd(a *app) *cobra.Command {
 			}
 			fmt.Fprintln(a.Stdout)
 			tw := tabwriter.NewWriter(a.Stdout, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(tw, "TARGET\tSTATE\tNODE\tCLIENTS\tSINCE")
+			fmt.Fprintln(tw, "DEVICE\tTARGET\tSTATE\tNODE\tCLIENTS\tSINCE")
 			for _, l := range st.Links {
 				node := orDash(l.Node)
 				if l.NodeID != "" && l.Node != l.NodeID {
 					node += " " + l.NodeID
 				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s ago\n", l.Target, l.State, sanitise(node), l.Clients, ago(now, l.Since))
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s ago\n", orDash(names[l.Target.String()]), l.Target, l.State, sanitise(node), l.Clients, ago(now, l.Since))
 			}
 			return tw.Flush()
 		},

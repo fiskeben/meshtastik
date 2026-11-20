@@ -210,7 +210,7 @@ func newNodesCmd(a *app) *cobra.Command {
 		newNodesOpCmd(a, device.Unignore, "Stop ignoring nodes"),
 		newNodesResetCmd(a),
 	} {
-		cmd.AddCommand(supportsDest(sub))
+		cmd.AddCommand(supportsDest(changes(sub, "yes")))
 	}
 	return cmd
 }

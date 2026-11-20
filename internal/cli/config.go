@@ -27,6 +27,9 @@ func confirmOrAbort(ctx context.Context, a *app, prompt string) error {
 	if a.yes {
 		return nil
 	}
+	if a.acting != "" {
+		prompt = a.acting + ": " + prompt
+	}
 	if a.Confirm != nil {
 		answer := make(chan bool, 1)
 		go func() { answer <- a.Confirm(prompt) }()
@@ -45,8 +48,8 @@ func confirmOrAbort(ctx context.Context, a *app, prompt string) error {
 
 func newConfigCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{Use: "config", Short: "Read and change the node's configuration"}
-	cmd.AddCommand(supportsDest(newConfigGetCmd(a)), supportsDest(newConfigSetCmd(a)),
-		supportsDest(newConfigExportCmd(a)), supportsDest(newConfigImportCmd(a)))
+	cmd.AddCommand(supportsDest(newConfigGetCmd(a)), supportsDest(changes(newConfigSetCmd(a), "yes")),
+		supportsDest(newConfigExportCmd(a)), supportsDest(changes(newConfigImportCmd(a), "yes")))
 	return cmd
 }
 

@@ -37,10 +37,11 @@ func (a *app) checkDest(cmd *cobra.Command) error {
 // --dest node, which is first asked for its metadata. --dest naming the
 // connected node means the connected node.
 func (a *app) node(cmd *cobra.Command, c *device.Client) (device.Node, error) {
+	st := c.State()
+	a.acting = nodeRef(st, st.MyInfo.GetMyNodeNum())
 	if a.dest == "" {
 		return device.Local{Client: c}, nil
 	}
-	st := c.State()
 	num, err := resolveNode(st, a.dest)
 	if err != nil {
 		return nil, fmt.Errorf("--dest: %w", err)
@@ -48,7 +49,8 @@ func (a *app) node(cmd *cobra.Command, c *device.Client) (device.Node, error) {
 	if num == st.MyInfo.GetMyNodeNum() {
 		return device.Local{Client: c}, nil
 	}
-	fmt.Fprintf(a.Stderr, "reaching %s over the mesh — this can take a while\n", nodeRef(st, num))
+	a.acting = nodeRef(st, num)
+	fmt.Fprintf(a.Stderr, "reaching %s over the mesh — this can take a while\n", a.acting)
 	return c.Remote(cmdContext(cmd), num)
 }
 

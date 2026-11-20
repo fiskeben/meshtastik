@@ -76,12 +76,12 @@ func newOwnerCmd(a *app) *cobra.Command {
 		},
 	}
 	set.Flags().StringVar(&short, "short", "", "short name (up to 4 bytes); kept unchanged if omitted")
-	cmd.AddCommand(supportsDest(set))
+	cmd.AddCommand(supportsDest(changes(set, "yes")))
 	return cmd
 }
 
 func newRebootCmd(a *app) *cobra.Command {
-	return supportsDest(&cobra.Command{
+	return supportsDest(changes(&cobra.Command{
 		Use:   "reboot",
 		Short: "Ask the node to reboot (it restarts in ~5 seconds)",
 		Args:  cobra.NoArgs,
@@ -97,11 +97,11 @@ func newRebootCmd(a *app) *cobra.Command {
 			_, err = fmt.Fprintf(a.Stdout, "Reboot requested (node restarts in ~%d seconds).\n", powerDelay)
 			return err
 		},
-	})
+	}, "yes"))
 }
 
 func newShutdownCmd(a *app) *cobra.Command {
-	return supportsDest(&cobra.Command{
+	return supportsDest(changes(&cobra.Command{
 		Use:   "shutdown",
 		Short: "Ask the node to power off (it shuts down in ~5 seconds)",
 		Args:  cobra.NoArgs,
@@ -124,7 +124,7 @@ func newShutdownCmd(a *app) *cobra.Command {
 			_, err = fmt.Fprintf(a.Stdout, "Shutdown requested (node powers off in ~%d seconds).\n", powerDelay)
 			return err
 		},
-	})
+	}, "yes"))
 }
 
 func newFactoryResetCmd(a *app) *cobra.Command {
@@ -157,5 +157,5 @@ func newFactoryResetCmd(a *app) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&full, "full", false, "also erase device state")
-	return supportsDest(cmd)
+	return supportsDest(changes(cmd, "yes"))
 }

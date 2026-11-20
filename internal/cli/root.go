@@ -19,6 +19,7 @@ import (
 
 	"meshtastik/internal/daemon"
 	"meshtastik/internal/device"
+	"meshtastik/internal/devices"
 	"meshtastik/internal/transport"
 )
 
@@ -44,6 +45,12 @@ type Deps struct {
 	// StartDaemon starts this program in the background with args (such as
 	// "daemon", "run") to serve sock.
 	StartDaemon func(sock string, args ...string) error
+	// DevicesFile holds the named devices and the current device; empty
+	// means there are none and none can be saved.
+	DevicesFile string
+	// Getenv reads the environment variables that choose a connection
+	// (MESHTASTIK_DEVICE and the like); nil reads none.
+	Getenv func(string) string
 }
 
 // DefaultDeps returns dependencies wired to the real process environment.
@@ -55,6 +62,8 @@ func DefaultDeps() Deps {
 		Stderr:      os.Stderr,
 		Confirm:     terminalConfirm,
 		StartDaemon: daemon.Spawn,
+		DevicesFile: devices.Path(),
+		Getenv:      os.Getenv,
 	}
 	if os.Getenv("MESHTASTIK_NO_DAEMON") == "" {
 		d.DaemonSocket = daemon.SocketPath()
@@ -132,6 +141,7 @@ func kindOf(f ConnFlags) transport.Kind {
 type app struct {
 	Deps
 	conn     ConnFlags
+	device   string
 	asJSON   bool
 	yes      bool
 	debug    bool
@@ -139,7 +149,8 @@ type app struct {
 	dest     string
 	timeout  time.Duration
 
-	versionNoted bool // the daemon version mismatch note was printed
+	versionNoted bool   // the daemon version mismatch note was printed
+	acting       string // the node admin commands act on, for prompts
 }
 
 // connect is the one place commands obtain a client. The caller must Close it.
@@ -151,24 +162,25 @@ func (a *app) connect(cmd *cobra.Command) (*device.Client, error) {
 // before Deps.DeviceOptions. backlog asks the daemon for the packets that
 // arrived while no listener was attached.
 func (a *app) connectWith(cmd *cobra.Command, backlog bool, adjust func(*device.Options)) (*device.Client, error) {
-	for _, name := range []string{"port", "host", "ble"} {
-		if f := cmd.Flags().Lookup(name); f != nil && f.Changed && f.Value.String() == "" {
-			return nil, fmt.Errorf("--%s must not be empty", name)
-		}
+	r, err := a.resolveConn()
+	if err != nil {
+		return nil, err
+	}
+	if r.from != "" && changesNode(cmd) {
+		fmt.Fprintf(a.Stderr, "using %s — %s\n", r, r.from)
 	}
 	opts := device.Options{HandshakeTimeout: a.timeout, MeshTimeout: a.timeout}
 	if opts.HandshakeTimeout == 0 {
-		opts.HandshakeTimeout = defaultHandshakeTimeout(kindOf(a.conn))
+		opts.HandshakeTimeout = defaultHandshakeTimeout(kindOf(r.conn))
 	}
 	var dial transport.Dialer
-	var err error
 	if a.DaemonSocket != "" && !a.noDaemon {
-		dial, err = a.daemonDialer(backlog, opts.HandshakeTimeout)
+		dial, err = a.daemonDialer(r.conn, backlog, opts.HandshakeTimeout)
 	} else {
-		dial, err = a.Dial(a.conn)
+		dial, err = a.Dial(r.conn)
 	}
 	if err != nil {
-		return nil, err
+		return nil, r.wrap(err)
 	}
 	if a.debug {
 		opts.Log = a.Stderr
@@ -182,11 +194,12 @@ func (a *app) connectWith(cmd *cobra.Command, backlog bool, adjust func(*device.
 	if a.DeviceOptions != nil {
 		a.DeviceOptions(&opts)
 	}
-	ctx := cmd.Context()
-	if ctx == nil {
-		ctx = context.Background()
+	ctx := cmdContext(cmd)
+	c, err := device.Open(ctx, dial, opts)
+	if err != nil && ctx.Err() == nil {
+		err = r.wrap(err)
 	}
-	return device.Open(ctx, dial, opts)
+	return c, err
 }
 
 // protoOutput renders messages for display: proto field names, and zero
@@ -245,13 +258,18 @@ func NewRoot(d Deps) *cobra.Command {
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			n := 0
-			for _, s := range []string{a.conn.Port, a.conn.Host, a.conn.BLE} {
-				if s != "" {
-					n++
+			for _, name := range []string{"port", "host", "ble", "device"} {
+				f := cmd.Flags().Lookup(name)
+				if f == nil || !f.Changed {
+					continue
 				}
+				if f.Value.String() == "" {
+					return fmt.Errorf("--%s must not be empty", name)
+				}
+				n++
 			}
 			if n > 1 {
-				return errors.New("only one of --port, --host, --ble may be given")
+				return errors.New("only one of --port, --host, --ble, --device may be given")
 			}
 			return a.checkDest(cmd)
 		},
@@ -266,6 +284,8 @@ func NewRoot(d Deps) *cobra.Command {
 	pf.StringVar(&a.conn.Port, "port", "", "serial port path")
 	pf.StringVar(&a.conn.Host, "host", "", "TCP host[:port] (default port 4403)")
 	pf.StringVar(&a.conn.BLE, "ble", "", "BLE device name or address")
+	pf.StringVar(&a.device, "device", "", "connect to this named device (see 'meshtastik device'; also MESHTASTIK_DEVICE)")
+	root.RegisterFlagCompletionFunc("device", a.completeDevices)
 	pf.BoolVar(&a.asJSON, "json", false, "output JSON")
 	pf.BoolVar(&a.yes, "yes", false, "skip confirmations")
 	pf.BoolVar(&a.debug, "debug", false, "debug logging")
@@ -283,6 +303,6 @@ func NewRoot(d Deps) *cobra.Command {
 	})
 	root.AddCommand(newInfoCmd(a), newNodesCmd(a), newConfigCmd(a), newOwnerCmd(a),
 		newRebootCmd(a), newShutdownCmd(a), newFactoryResetCmd(a), newChannelCmd(a), newBLECmd(a), newSendCmd(a), newListenCmd(a), newDaemonCmd(a),
-		newTracerouteCmd(a), newRequestCmd(a), newAdminKeyCmd(a))
+		newTracerouteCmd(a), newRequestCmd(a), newAdminKeyCmd(a), newUseCmd(a), newDeviceCmd(a))
 	return root
 }

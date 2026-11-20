@@ -138,5 +138,5 @@ func newSendCmd(a *app) *cobra.Command {
 	f.StringVar(&to, "to", "", "destination node: !hex id, number, or name (default: broadcast)")
 	f.IntVar(&channel, "channel", 0, "channel index 0-7")
 	f.DurationVar(&ackTimeout, "ack-timeout", 30*time.Second, "how long to wait for a direct message's acknowledgement")
-	return cmd
+	return changes(cmd, "yes")
 }

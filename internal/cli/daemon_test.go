@@ -14,6 +14,7 @@ import (
 
 	"meshtastik/internal/daemon"
 	"meshtastik/internal/device"
+	"meshtastik/internal/devices"
 	"meshtastik/internal/fakedevice"
 	"meshtastik/internal/transport"
 )
@@ -22,7 +23,8 @@ import (
 type testDaemon struct {
 	sock    string
 	d       *fakedevice.Device
-	started int // calls to StartDaemon
+	started int    // calls to StartDaemon
+	devices string // Deps.DevicesFile
 	cancel  context.CancelFunc
 	done    chan struct{}
 }
@@ -90,6 +92,7 @@ func (td *testDaemon) run(t *testing.T, ctx context.Context, args ...string) (st
 		Confirm:       func(string) bool { return true },
 		DeviceOptions: func(o *device.Options) { o.RebootGrace, o.ReconnectDelay = 50*time.Millisecond, 10*time.Millisecond },
 		DaemonSocket:  td.sock,
+		DevicesFile:   td.devices,
 		StartDaemon: func(sock string, args ...string) error {
 			td.started++
 			td.start(t)
@@ -206,6 +209,34 @@ func TestDaemonStatusAndStopCommands(t *testing.T) {
 	}
 	out, _, err = td.run(t, context.Background(), "daemon", "stop")
 	if err != nil || out != "daemon not running\n" {
+		t.Fatalf("%q %v", out, err)
+	}
+}
+
+func TestDaemonStatusNamesDevices(t *testing.T) {
+	td := newTestDaemon(t, fakedevice.New())
+	td.devices = filepath.Join(t.TempDir(), "devices.yaml")
+	if err := devices.Save(td.devices, &devices.File{Devices: map[string]devices.Target{
+		"desk": {Port: "/dev/fake"}, "bench": {Port: "/dev/fake"}, "home": {Host: "10.0.0.2"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := td.run(t, context.Background(), "info"); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := td.run(t, context.Background(), "daemon", "status")
+	if err != nil || !strings.Contains(out, "DEVICE      TARGET") || !strings.Contains(out, "bench,desk  serial:/dev/fake") {
+		t.Fatalf("%q %v", out, err)
+	}
+	out, _, err = td.run(t, context.Background(), "--json", "daemon", "status")
+	var st struct {
+		Links []struct {
+			Device string        `json:"device"`
+			Target daemon.Target `json:"target"`
+		} `json:"links"`
+	}
+	if err != nil || json.Unmarshal([]byte(out), &st) != nil || len(st.Links) != 1 ||
+		st.Links[0].Device != "bench,desk" || st.Links[0].Target.Addr != "/dev/fake" {
 		t.Fatalf("%q %v", out, err)
 	}
 }

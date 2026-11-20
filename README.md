@@ -42,6 +42,26 @@ Pick one transport with a global flag. With none, meshtastik looks for a serial 
 - `--port <path>` serial port
 - `--host <host[:port]>` TCP (default port 4403)
 - `--ble <name or address>` Bluetooth LE
+- `--device <name>` a named device (below)
+
+### Named and current devices
+
+To avoid passing a flag on every command, name the nodes you use and pick one as the current device:
+
+```
+$ meshtastik device add home --host 192.168.1.40
+$ meshtastik device add hill --ble Hill_1234
+$ meshtastik use home
+Commands now connect to home (tcp:192.168.1.40).
+$ meshtastik info                  # connects to home
+$ meshtastik --device hill info    # just this once
+```
+
+- `use --host 192.168.1.40` (or `--port`, `--ble`) saves a current device without naming it. `use` alone shows which node commands connect to and why; `use --clear` forgets it.
+- Commands pick the node from, in order: `--port`/`--host`/`--ble`/`--device`; then `MESHTASTIK_DEVICE`, `MESHTASTIK_PORT`, `MESHTASTIK_HOST` or `MESHTASTIK_BLE` (one of them, handy per terminal or in scripts); then the current device; then a single serial port.
+- When the node came from the environment or the current device, commands that change it (or `send`) say which one on stderr first: `using home (tcp:192.168.1.40) — the current device`. Confirmation prompts start with the node they act on.
+- If the current device can't be reached, the command fails and says so; it never falls back to another node.
+- Devices are kept in `devices.yaml` in your config directory (`~/Library/Application Support/meshtastik` on macOS, `~/.config/meshtastik` on Linux), or at `$MESHTASTIK_DEVICES`.
 
 Other global flags: `--json`, `--yes` (skip confirmations), `--debug`, `--timeout <duration>` (bounds the handshake and each request, not the whole operation; 0 = per-transport default), `--no-daemon` (see below), `--dest <node>` (see [Remote admin](#remote-admin)).
 
@@ -107,7 +127,11 @@ Applied 1 change(s); verified.
 | `request position <node>` | Ask a node for its position |
 | `request telemetry <node> [--type device\|environment\|power\|local-stats]` | Ask a node for its telemetry |
 | `ble scan [--duration d]` | Scan for nearby Meshtastic devices over BLE (directly, never through the daemon) |
-| `daemon status` | Show whether the daemon runs, its socket and log, and the node connections it holds |
+| `device add <name> --port/--host/--ble X` | Name a node connection, for `--device` and `use` (an existing name is replaced) |
+| `device list` | List the named devices; `*` marks the current one |
+| `device remove <name>` | Forget a named device |
+| `use [name \| --port/--host/--ble X \| --clear]` | Choose the node commands connect to when none is given; without arguments, show it |
+| `daemon status` | Show whether the daemon runs, its socket and log, and the node connections it holds (with their device names) |
 | `daemon start [--idle-timeout d]` | Start the daemon in the background unless it is running (it also starts on demand) |
 | `daemon stop` | Stop the daemon, closing its node connections |
 | `daemon restart [--idle-timeout d]` | Stop the daemon, then start it (e.g. after an upgrade) |

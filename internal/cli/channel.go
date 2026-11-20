@@ -24,8 +24,8 @@ const maxChannelName = 11
 
 func newChannelCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{Use: "channel", Short: "Manage channels and channel URLs"}
-	subs := []*cobra.Command{newChannelListCmd(a), newChannelAddCmd(a), newChannelSetCmd(a),
-		newChannelDelCmd(a), newChannelURLCmd(a)}
+	subs := []*cobra.Command{newChannelListCmd(a), changes(newChannelAddCmd(a), "yes"), changes(newChannelSetCmd(a), "yes"),
+		changes(newChannelDelCmd(a), "yes"), changes(newChannelURLCmd(a), "set")}
 	supportsDest(subs...)
 	cmd.AddCommand(subs...)
 	return cmd
