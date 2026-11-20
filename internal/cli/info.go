@@ -8,6 +8,8 @@ import (
 
 	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
 	"github.com/spf13/cobra"
+
+	"meshtastik/internal/device"
 )
 
 func nodeID(num uint32) string { return fmt.Sprintf("!%08x", num) }
@@ -97,6 +99,21 @@ type nodeRow struct {
 	SNR          float32 `json:"snr"`
 	HopsAway     *uint32 `json:"hops_away"`
 	BatteryLevel *uint32 `json:"battery_level"`
+	IsFavorite   bool    `json:"is_favorite"`
+	IsIgnored    bool    `json:"is_ignored"`
+}
+
+// flags is the FLAGS column: fav, ignored, both, or "-".
+func (r nodeRow) flags() string {
+	switch {
+	case r.IsFavorite && r.IsIgnored:
+		return "fav,ignored"
+	case r.IsFavorite:
+		return "fav"
+	case r.IsIgnored:
+		return "ignored"
+	}
+	return "-"
 }
 
 // relTime formats a unix timestamp as e.g. "5m ago"; "-" when unknown.
@@ -117,9 +134,9 @@ func relTime(unix uint32, now time.Time) string {
 }
 
 func newNodesCmd(a *app) *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "nodes",
-		Short: "List nodes known to the connected node",
+		Short: "List nodes known to the connected node, or change the node list",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := a.connect(cmd)
@@ -143,6 +160,7 @@ func newNodesCmd(a *app) *cobra.Command {
 					ID: nodeID(n.GetNum()), Num: n.GetNum(),
 					LongName: n.GetUser().GetLongName(), ShortName: n.GetUser().GetShortName(),
 					SNR: n.GetSnr(), BatteryLevel: batteryOf(n),
+					IsFavorite: n.GetIsFavorite(), IsIgnored: n.GetIsIgnored(),
 				}
 				if n.GetLastHeard() != 0 {
 					s := time.Unix(int64(n.GetLastHeard()), 0).UTC().Format(time.RFC3339)
@@ -159,16 +177,25 @@ func newNodesCmd(a *app) *cobra.Command {
 			}
 			now := time.Now()
 			tw := tabwriter.NewWriter(a.Stdout, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(tw, "ID\tNAME\tSHORT\tLAST HEARD\tSNR\tHOPS\tBATTERY")
+			fmt.Fprintln(tw, "ID\tNAME\tSHORT\tLAST HEARD\tSNR\tHOPS\tBATTERY\tFLAGS")
 			for i, r := range rows {
 				hops := "-"
 				if r.HopsAway != nil {
 					hops = fmt.Sprint(*r.HopsAway)
 				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%.1f\t%s\t%s\n", r.ID, orDash(r.LongName), orDash(r.ShortName),
-					relTime(nodes[i].GetLastHeard(), now), r.SNR, hops, batteryText(r.BatteryLevel))
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%.1f\t%s\t%s\t%s\n", r.ID, orDash(r.LongName), orDash(r.ShortName),
+					relTime(nodes[i].GetLastHeard(), now), r.SNR, hops, batteryText(r.BatteryLevel), r.flags())
 			}
 			return tw.Flush()
 		},
 	}
+	cmd.AddCommand(
+		newNodesOpCmd(a, device.RemoveNode, "Remove nodes from the node list"),
+		newNodesOpCmd(a, device.Favorite, "Mark nodes as favourites"),
+		newNodesOpCmd(a, device.Unfavorite, "Unmark favourite nodes"),
+		newNodesOpCmd(a, device.Ignore, "Ignore nodes: the node drops their packets"),
+		newNodesOpCmd(a, device.Unignore, "Stop ignoring nodes"),
+		newNodesResetCmd(a),
+	)
+	return cmd
 }
