@@ -43,7 +43,7 @@ Pick one transport with a global flag. With none, meshtastik looks for a serial 
 - `--host <host[:port]>` TCP (default port 4403)
 - `--ble <name or address>` Bluetooth LE
 
-Other global flags: `--json`, `--yes` (skip confirmations), `--debug`, `--timeout <duration>` (bounds the handshake and each request, not the whole operation; 0 = per-transport default), `--no-daemon` (see below).
+Other global flags: `--json`, `--yes` (skip confirmations), `--debug`, `--timeout <duration>` (bounds the handshake and each request, not the whole operation; 0 = per-transport default), `--no-daemon` (see below), `--dest <node>` (see [Remote admin](#remote-admin)).
 
 ## The daemon
 
@@ -53,6 +53,29 @@ Commands connect to the node through a background daemon. The first command star
 - It listens on a socket only you can open: `$MESHTASTIK_SOCKET`, else `$XDG_RUNTIME_DIR/meshtastik.sock`, else `meshtastik-<uid>.sock` in the temporary directory. Its log sits next to the socket (`.log`); `daemon status` shows both paths.
 - `--no-daemon`, or `MESHTASTIK_NO_DAEMON=1`, connects directly as before. A serial port the daemon holds can't be opened directly at the same time; run `meshtastik daemon stop` first.
 - After upgrading meshtastik, commands note that the daemon runs the old version until you run `meshtastik daemon restart`.
+
+## Remote admin
+
+With `--dest <node>`, admin commands act on another node over the mesh instead of the one you are connected to: a solar repeater on a roof, a node at a cabin. `<node>` is a `!hex` id, a number or a name from the connected node's node list.
+
+Setup, once per remote node:
+
+1. On the node you connect to, `meshtastik info` shows its public key (`base64:…`).
+2. Connect to the remote node locally (USB, WiFi or Bluetooth) and allow that key: `meshtastik admin-key add <the key, or the name of your node>`.
+3. From then on, through your own node:
+
+```
+$ meshtastik --dest HIL1 config set lora.hop_limit 5
+reaching !00000099 (Hill) over the mesh — this can take a while
+Applied 1 change(s); verified.
+```
+
+- Supported by `info`, `config get/set/export/import`, `owner set`, `channel list/add/set/del/url`, `reboot`, `shutdown`, `factory-reset`, `nodes remove/favorite/unfavorite/ignore/unignore/reset` and `admin-key …`. Other commands refuse `--dest`.
+- The remote node must run firmware 2.5 or newer and list your node's public key in its `security.admin_key`; otherwise the error says so and how to fix it. Your node must have heard the remote node's node info (it needs its public key to encrypt).
+- Every answer is waited for 30 seconds (`--timeout` changes that) and each message is tried up to 3 times. Commands read only what they need (`config get lora.region` reads the LoRa section); a full `config get` or `config export` reads every section and channel one by one, which takes a while on LoRa.
+- Writes are verified by reading them back, waiting for the node if it reboots. Two things cannot be read back from a remote node, and the output says so: the coordinates of a fixed position, and its node list (`nodes …` reports `sent`).
+- A private key never goes over the air: a remote `config export` has none, and `config import --keys --dest` is refused. Writing a remote node's security section (`admin-key`, `config set security.…`) needs firmware 2.8 or newer on it; older firmware would replace or clear its keys.
+- Changes that could cut the remote node off ask first: its LoRa link settings (region, preset, frequency, channel number, `tx_enabled`), its primary channel, and an admin key list without your node's key. `shutdown` and `factory-reset` say the node cannot be reached remotely afterwards.
 
 ## Commands
 

@@ -1,7 +1,7 @@
 # meshtastik mesh features — design
 
 Date: 2026-11-20
-Status: draft for approval
+Status: approved; built on branch mesh-features
 
 ## Intent
 

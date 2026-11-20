@@ -28,7 +28,8 @@ node owner needs to configure and look after their nodes is.
 ## Non-goals
 
 - Remote admin over the mesh (admin messages routed to other nodes, PKI admin
-  keys used for remote control). Local nodes only.
+  keys used for remote control). Local nodes only. (Superseded on 2026-11-20
+  by `2026-11-20-meshtastik-mesh-features-design.md`.)
 - Feature parity with the Python CLI or its flag names beyond `--port`,
   `--host`, `--ble`.
 - Long-running features: tunnel, power monitoring, telemetry/packet logging,
