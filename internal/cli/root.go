@@ -17,6 +17,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"sigs.k8s.io/yaml"
 
+	"meshtastik/internal/daemon"
 	"meshtastik/internal/device"
 	"meshtastik/internal/transport"
 )
@@ -37,16 +38,28 @@ type Deps struct {
 	Confirm func(prompt string) bool
 	// DeviceOptions, when set, adjusts the client options chosen by connect.
 	DeviceOptions func(*device.Options)
+	// DaemonSocket, when set, is the socket of the daemon that commands
+	// connect through; empty connects directly with Dial.
+	DaemonSocket string
+	// StartDaemon starts this program in the background with args (such as
+	// "daemon", "run") to serve sock.
+	StartDaemon func(sock string, args ...string) error
 }
 
 // DefaultDeps returns dependencies wired to the real process environment.
+// Commands go through the daemon unless MESHTASTIK_NO_DAEMON is set.
 func DefaultDeps() Deps {
-	return Deps{
-		Dial:    defaultDial,
-		Stdout:  os.Stdout,
-		Stderr:  os.Stderr,
-		Confirm: terminalConfirm,
+	d := Deps{
+		Dial:        defaultDial,
+		Stdout:      os.Stdout,
+		Stderr:      os.Stderr,
+		Confirm:     terminalConfirm,
+		StartDaemon: daemon.Spawn,
 	}
+	if os.Getenv("MESHTASTIK_NO_DAEMON") == "" {
+		d.DaemonSocket = daemon.SocketPath()
+	}
+	return d
 }
 
 // chooseConn picks the transport and its target from the flags. Without any
@@ -118,31 +131,43 @@ func kindOf(f ConnFlags) transport.Kind {
 // app is the state shared by all subcommands: dependencies and global flags.
 type app struct {
 	Deps
-	conn    ConnFlags
-	asJSON  bool
-	yes     bool
-	debug   bool
-	timeout time.Duration
+	conn     ConnFlags
+	asJSON   bool
+	yes      bool
+	debug    bool
+	noDaemon bool
+	timeout  time.Duration
+
+	versionNoted bool // the daemon version mismatch note was printed
 }
 
 // connect is the one place commands obtain a client. The caller must Close it.
-func (a *app) connect(cmd *cobra.Command) (*device.Client, error) { return a.connectWith(cmd, nil) }
+func (a *app) connect(cmd *cobra.Command) (*device.Client, error) {
+	return a.connectWith(cmd, false, nil)
+}
 
 // connectWith is connect with adjust, when set, applied to the client options
-// before Deps.DeviceOptions.
-func (a *app) connectWith(cmd *cobra.Command, adjust func(*device.Options)) (*device.Client, error) {
+// before Deps.DeviceOptions. backlog asks the daemon for the packets that
+// arrived while no listener was attached.
+func (a *app) connectWith(cmd *cobra.Command, backlog bool, adjust func(*device.Options)) (*device.Client, error) {
 	for _, name := range []string{"port", "host", "ble"} {
 		if f := cmd.Flags().Lookup(name); f != nil && f.Changed && f.Value.String() == "" {
 			return nil, fmt.Errorf("--%s must not be empty", name)
 		}
 	}
-	dial, err := a.Dial(a.conn)
-	if err != nil {
-		return nil, err
-	}
 	opts := device.Options{HandshakeTimeout: a.timeout}
 	if opts.HandshakeTimeout == 0 {
 		opts.HandshakeTimeout = defaultHandshakeTimeout(kindOf(a.conn))
+	}
+	var dial transport.Dialer
+	var err error
+	if a.DaemonSocket != "" && !a.noDaemon {
+		dial, err = a.daemonDialer(backlog, opts.HandshakeTimeout)
+	} else {
+		dial, err = a.Dial(a.conn)
+	}
+	if err != nil {
+		return nil, err
 	}
 	if a.debug {
 		opts.Log = a.Stderr
@@ -240,6 +265,7 @@ func NewRoot(d Deps) *cobra.Command {
 	pf.BoolVar(&a.asJSON, "json", false, "output JSON")
 	pf.BoolVar(&a.yes, "yes", false, "skip confirmations")
 	pf.BoolVar(&a.debug, "debug", false, "debug logging")
+	pf.BoolVar(&a.noDaemon, "no-daemon", false, "connect to the node directly instead of through the background daemon (also MESHTASTIK_NO_DAEMON=1)")
 	pf.DurationVar(&a.timeout, "timeout", 0, "timeout that bounds the handshake and each request, not the whole operation (0 = per-transport default)")
 
 	root.AddCommand(&cobra.Command{
@@ -251,6 +277,6 @@ func NewRoot(d Deps) *cobra.Command {
 		},
 	})
 	root.AddCommand(newInfoCmd(a), newNodesCmd(a), newConfigCmd(a), newOwnerCmd(a),
-		newRebootCmd(a), newShutdownCmd(a), newFactoryResetCmd(a), newChannelCmd(a), newBLECmd(a), newSendCmd(a), newListenCmd(a))
+		newRebootCmd(a), newShutdownCmd(a), newFactoryResetCmd(a), newChannelCmd(a), newBLECmd(a), newSendCmd(a), newListenCmd(a), newDaemonCmd(a))
 	return root
 }

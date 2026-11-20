@@ -238,7 +238,7 @@ func newListenCmd(a *app) *cobra.Command {
 			if !follow && !cmd.Flags().Changed("count") {
 				count = 1
 			}
-			c, err := a.connectWith(cmd, func(o *device.Options) {
+			c, err := a.connectWith(cmd, true, func(o *device.Options) {
 				o.OnReconnect = func(cause error, wait time.Duration) {
 					fmt.Fprintf(a.Stderr, "%v; reconnecting in %s\n", cause, wait)
 				}

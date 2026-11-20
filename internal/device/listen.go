@@ -84,6 +84,7 @@ const shortDropLimit = 3
 // gives up, with an error saying so, after shortDropLimit drops of links
 // younger than Options.StableLink within ReconnectTimeout, or after
 // shortDropLimit reconnect attempts that the node closes mid-handshake.
+// Options.OnReconnected is called after each successful reconnect.
 func (c *Client) Listen(ctx context.Context, fn func(*pb.FromRadio) error) error {
 	var shortDrops []time.Time // recent drops of short-lived links
 	var delay time.Duration    // wait before the next redial
@@ -147,6 +148,9 @@ func (c *Client) Listen(ctx context.Context, fn func(*pb.FromRadio) error) error
 				return nil
 			}
 			return err
+		}
+		if c.opts.OnReconnected != nil {
+			c.opts.OnReconnected()
 		}
 	}
 }

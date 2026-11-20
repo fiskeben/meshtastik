@@ -80,6 +80,13 @@ type Options struct {
 	// after each failed reconnect attempt, with the cause and the wait
 	// before redialling.
 	OnReconnect func(cause error, wait time.Duration)
+	// OnReconnected, when set, is called by Listen once a reconnect after a
+	// dropped link has succeeded.
+	OnReconnected func()
+	// OnMessage, when set, is called on the reader goroutine with each
+	// received message that is neither a packet nor part of the handshake
+	// (rebooted, queue status, client notifications, …). It must not block.
+	OnMessage func(*pb.FromRadio)
 }
 
 func (o *Options) defaults() {
@@ -420,6 +427,18 @@ func (c *Client) send(ctx context.Context, m *pb.ToRadio) error {
 	return c.current().send(ctx, m)
 }
 
+// Send writes m to the node as it is, for callers that relay messages built
+// elsewhere.
+func (c *Client) Send(ctx context.Context, m *pb.ToRadio) error { return c.send(ctx, m) }
+
+// Refresh re-reads the node's state by running the handshake again on the
+// current connection.
+func (c *Client) Refresh(ctx context.Context) error {
+	c.applyMu.Lock()
+	defer c.applyMu.Unlock()
+	return c.handshake(ctx, c.current(), c.opts.HandshakeTimeout, true)
+}
+
 // readLoop is the only goroutine that reads from l's connection.
 func (c *Client) readLoop(ctx context.Context, l *link) {
 	defer l.wg.Done()
@@ -459,6 +478,9 @@ func (c *Client) dispatch(l *link, m *pb.FromRadio) {
 		if v.Rebooted {
 			l.markRebooted()
 		}
+		if c.opts.OnMessage != nil {
+			c.opts.OnMessage(m)
+		}
 	case *pb.FromRadio_Packet:
 		p := v.Packet
 		if p == nil {
@@ -477,7 +499,11 @@ func (c *Client) dispatch(l *link, m *pb.FromRadio) {
 		}
 		c.packets.push(m)
 	default:
-		fmt.Fprintf(c.opts.Log, "ignoring %T\n", m.PayloadVariant)
+		if c.opts.OnMessage != nil {
+			c.opts.OnMessage(m)
+		} else {
+			fmt.Fprintf(c.opts.Log, "ignoring %T\n", m.PayloadVariant)
+		}
 	}
 }
 

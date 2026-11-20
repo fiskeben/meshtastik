@@ -43,7 +43,16 @@ Pick one transport with a global flag. With none, meshtastik looks for a serial 
 - `--host <host[:port]>` TCP (default port 4403)
 - `--ble <name or address>` Bluetooth LE
 
-Other global flags: `--json`, `--yes` (skip confirmations), `--debug`, `--timeout <duration>` (bounds the handshake and each request, not the whole operation; 0 = per-transport default).
+Other global flags: `--json`, `--yes` (skip confirmations), `--debug`, `--timeout <duration>` (bounds the handshake and each request, not the whole operation; 0 = per-transport default), `--no-daemon` (see below).
+
+## The daemon
+
+Commands connect to the node through a background daemon. The first command starts it, and it keeps the node connection open between commands, so later commands start at once instead of waiting for the node's config dump. Several commands can use a node at the same time (`listen -f` in one terminal, `send` in another), and messages that arrive between `listen` runs are kept for the next one (up to 256).
+
+- One daemon per user holds a connection to each node you've used (one per `--port`/`--host`/`--ble` value). A connection with no commands using it is closed after 30 minutes, and the daemon exits once it has none left.
+- It listens on a socket only you can open: `$MESHTASTIK_SOCKET`, else `$XDG_RUNTIME_DIR/meshtastik.sock`, else `meshtastik-<uid>.sock` in the temporary directory. Its log sits next to the socket (`.log`); `daemon status` shows both paths.
+- `--no-daemon`, or `MESHTASTIK_NO_DAEMON=1`, connects directly as before. A serial port the daemon holds can't be opened directly at the same time; run `meshtastik daemon stop` first.
+- After upgrading meshtastik, commands note that the daemon runs the old version until you run `meshtastik daemon restart`.
 
 ## Commands
 
@@ -66,7 +75,12 @@ Other global flags: `--json`, `--yes` (skip confirmations), `--debug`, `--timeou
 | `factory-reset [--full]` | Erase the node's configuration (`--full` also erases device state) |
 | `send <text> [--to node] [--channel n] [--ack-timeout d]` | Send a text message; `--to` takes a `!hex` id, number or name (default: broadcast) |
 | `listen [-f] [--channel n] [--json [--raw]] [--all] [--count n]` | Print the next received message and exit; `-f`/`--follow` keeps printing (the node's queued backlog, then new ones) until Ctrl-C; `--all` adds other packet types, `--count` exits after n messages, `--raw` adds the whole FromRadio message to each JSON line under `raw` |
-| `ble scan [--duration d]` | Scan for nearby Meshtastic devices over BLE |
+| `ble scan [--duration d]` | Scan for nearby Meshtastic devices over BLE (directly, never through the daemon) |
+| `daemon status` | Show whether the daemon runs, its socket and log, and the node connections it holds |
+| `daemon start [--idle-timeout d]` | Start the daemon in the background unless it is running (it also starts on demand) |
+| `daemon stop` | Stop the daemon, closing its node connections |
+| `daemon restart [--idle-timeout d]` | Stop the daemon, then start it (e.g. after an upgrade) |
+| `daemon run [--idle-timeout d]` | Run the daemon in the foreground, logging to the terminal |
 | `version` | Print the version |
 
 Run `meshtastik <command> --help` for details.
@@ -80,7 +94,7 @@ Run `meshtastik <command> --help` for details.
 - `config import` restores `location` only when the backup's merged config has `position.fixed_position: true`; Python backups of GPS nodes carry a location that is otherwise ignored (with a note).
 - A node with `security.is_managed` set ignores local configuration, so meshtastik refuses changes to it, except turning `security.is_managed` off.
 - Changes that could cut the link in use (Bluetooth off or WiFi on over BLE, WiFi/network changes over TCP, the serial console off or taken over by the serial module over serial) ask for confirmation first.
-- `listen` has no history: it shows the few messages the node queued while no client was connected, then live traffic. The node hands each message to one connected client only, so if Home Assistant or the phone app is connected at the same time they split the traffic. If the connection keeps dropping soon after each reconnect (another client taking the node's one TCP slot), `listen` gives up with an error.
+- `listen` has no history beyond what the daemon has kept: it shows the messages that arrived while no `listen` was running (or, with `--no-daemon`, the few the node queued while no client was connected), then live traffic. The node hands each message to one connected client only, so if Home Assistant or the phone app is connected at the same time they split the traffic. If the connection keeps dropping soon after each reconnect (another client taking the node's one TCP slot), `listen` gives up with an error.
 - Ctrl-C during a change: before the commit, meshtastik reports that the node may hold a partial edit (reboot the node to discard it); after the commit, it reports that the changes were committed but could not be verified. A second Ctrl-C exits at once.
 
 ## Bluetooth
