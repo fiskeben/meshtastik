@@ -71,6 +71,7 @@ type Options struct {
 	ReconnectTimeout  time.Duration // default 90s
 	HeartbeatInterval time.Duration // default 5m
 	RebootGrace       time.Duration // default 3s: wait after a commit for the node to reboot
+	MeshTimeout       time.Duration // default 30s: wait for each answer from another node over the mesh
 	Log               io.Writer     // default io.Discard
 
 	// Listen's handling of dropped links (see Listen).
@@ -101,6 +102,9 @@ func (o *Options) defaults() {
 	}
 	if o.RebootGrace <= 0 {
 		o.RebootGrace = 3 * time.Second
+	}
+	if o.MeshTimeout <= 0 {
+		o.MeshTimeout = 30 * time.Second
 	}
 	if o.Log == nil {
 		o.Log = io.Discard
