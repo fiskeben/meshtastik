@@ -58,7 +58,7 @@ Commands connect to the node through a background daemon. The first command star
 
 | Command | What it does |
 | --- | --- |
-| `info` | Show the connected node's identity and basics |
+| `info` | Show the connected node's identity and basics, including its public key (what other nodes need in their admin keys) |
 | `nodes` | List nodes known to the connected node (FLAGS shows `fav` and `ignored`) |
 | `nodes remove/favorite/unfavorite/ignore/unignore <node>...` | Change entries in the node list; each change is verified by re-reading it (`remove` of several nodes asks first) |
 | `nodes reset [--keep-favorites]` | Clear the node list; the node reboots (nodes in a router or base role always keep favourites) |

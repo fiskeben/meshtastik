@@ -1,7 +1,10 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -57,5 +60,26 @@ func TestEmptyConnFlagRejected(t *testing.T) {
 	_, _, err := runCLI(t, fakedevice.New(), "", "info", "--host", "")
 	if err == nil || !strings.Contains(err.Error(), "--host") {
 		t.Fatal(err)
+	}
+}
+
+func TestInfoShowsPublicKey(t *testing.T) {
+	d := fakedevice.New()
+	key := bytes.Repeat([]byte{0xab}, 32)
+	d.Config.Security.PublicKey = key
+	want := "base64:" + base64.StdEncoding.EncodeToString(key)
+	out, _, err := runCLI(t, d, "", "info")
+	if err != nil || !regexp.MustCompile(`(?m)^Public key:\s+` + regexp.QuoteMeta(want) + `$`).MatchString(out) {
+		t.Fatal(out, err)
+	}
+	out, _, err = runCLI(t, d, "", "--json", "info")
+	var m map[string]any
+	if err != nil || json.Unmarshal([]byte(out), &m) != nil || m["public_key"] != want {
+		t.Fatal(out, err)
+	}
+	d.Config.Security.PublicKey = nil
+	out, _, _ = runCLI(t, d, "", "info")
+	if !regexp.MustCompile(`(?m)^Public key:\s+-$`).MatchString(out) {
+		t.Fatal(out)
 	}
 }

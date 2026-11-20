@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/base64"
 	"fmt"
 	"sort"
 	"text/tabwriter"
@@ -37,6 +38,15 @@ func batteryText(p *uint32) string {
 	return fmt.Sprintf("%d%%", *p)
 }
 
+// keyText writes a key as configpath writes bytes: "base64:<data>"; empty
+// for no key.
+func keyText(k []byte) string {
+	if len(k) == 0 {
+		return ""
+	}
+	return "base64:" + base64.StdEncoding.EncodeToString(k)
+}
+
 func newInfoCmd(a *app) *cobra.Command {
 	return &cobra.Command{
 		Use:   "info",
@@ -58,6 +68,7 @@ func newInfoCmd(a *app) *cobra.Command {
 				}
 			}
 			bat := batteryOf(self)
+			key := keyText(st.Config.GetSecurity().GetPublicKey())
 			if a.asJSON {
 				return printJSON(a.Stdout, map[string]any{
 					"id":            nodeID(num),
@@ -71,6 +82,7 @@ func newInfoCmd(a *app) *cobra.Command {
 					"modem_preset":  st.Config.GetLora().GetModemPreset().String(),
 					"battery_level": bat,
 					"channels":      channels,
+					"public_key":    key,
 				})
 			}
 			tw := tabwriter.NewWriter(a.Stdout, 0, 4, 2, ' ', 0)
@@ -85,6 +97,7 @@ func newInfoCmd(a *app) *cobra.Command {
 			row("Modem preset", st.Config.GetLora().GetModemPreset().String())
 			row("Battery", batteryText(bat))
 			row("Channels", fmt.Sprint(channels))
+			row("Public key", orDash(key))
 			return tw.Flush()
 		},
 	}
