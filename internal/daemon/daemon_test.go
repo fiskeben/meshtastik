@@ -319,3 +319,30 @@ func TestProtocolMismatchIsRefused(t *testing.T) {
 		t.Fatal(r, err)
 	}
 }
+
+func TestRemoteAdminDoesNotStaleTheCache(t *testing.T) {
+	d := fakedevice.New()
+	r := fakedevice.NewRemote(0x99, "Hill", "HIL1")
+	r.AdminKeys = [][]byte{d.PublicKey}
+	d.Remotes = map[uint32]*fakedevice.Remote{0x99: r}
+	h := start(t, d, 0)
+	c := h.open(t, false)
+	if d.WantConfigs() != 1 {
+		t.Fatal("daemon handshakes", d.WantConfigs())
+	}
+	if _, err := c.Request(context.Background(), 0x99, pb.PortNum_ADMIN_APP,
+		&pb.AdminMessage{PayloadVariant: &pb.AdminMessage_GetOwnerRequest{GetOwnerRequest: true}}, device.RequestOptions{PKI: true}); err != nil {
+		t.Fatal(err)
+	}
+	h.open(t, false)
+	if d.WantConfigs() != 1 {
+		t.Fatal("remote admin made the daemon re-read the node:", d.WantConfigs())
+	}
+	ch := configChange(t, c.State(), "lora.hop_limit", "5") // local admin still does
+	if _, err := c.Apply(context.Background(), []device.Change{ch}); err != nil {
+		t.Fatal(err)
+	}
+	if d.WantConfigs() < 2 {
+		t.Fatal("local admin did not make the daemon re-read the node")
+	}
+}

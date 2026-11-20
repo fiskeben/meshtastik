@@ -273,6 +273,14 @@ func (h *hub) takeBacklog() []*pb.FromRadio {
 	return b
 }
 
+// isLocal reports whether a packet to node num is for the connected node.
+func (h *hub) isLocal(num uint32) bool {
+	h.mu.Lock()
+	c := h.c
+	h.mu.Unlock()
+	return num == 0 || num == c.State().MyInfo.GetMyNodeNum()
+}
+
 func (h *hub) markStale() {
 	h.mu.Lock()
 	h.stale = true
@@ -493,8 +501,8 @@ func (s *session) handle(ctx context.Context, m *pb.ToRadio) bool {
 	case *pb.ToRadio_Heartbeat, *pb.ToRadio_Disconnect:
 		return true // the hub keeps its own connection alive
 	case *pb.ToRadio_Packet:
-		if v.Packet.GetDecoded().GetPortnum() == pb.PortNum_ADMIN_APP {
-			s.h.markStale()
+		if v.Packet.GetDecoded().GetPortnum() == pb.PortNum_ADMIN_APP && s.h.isLocal(v.Packet.GetTo()) {
+			s.h.markStale() // remote admin does not change the connected node
 		}
 	}
 	s.h.mu.Lock()
