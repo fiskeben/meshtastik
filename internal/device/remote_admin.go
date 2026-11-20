@@ -32,9 +32,18 @@ func (c *Client) stamped(to uint32, m *pb.AdminMessage) *pb.AdminMessage {
 	return m
 }
 
-// meshRetry runs try up to meshAttempts times while it gets no answer. When
-// node to rejects the session passkey, it fetches a new one and tries once
-// more.
+// lostOnTheWay reports whether err means the packet or its answer was lost:
+// no answer in time, or the connected node giving up on its own
+// retransmissions of a want_ack packet.
+func lostOnTheWay(err error) bool {
+	var re *RoutingError
+	return errors.Is(err, ErrNoAnswer) ||
+		errors.As(err, &re) && (re.Reason == pb.Routing_MAX_RETRANSMIT || re.Reason == pb.Routing_TIMEOUT)
+}
+
+// meshRetry runs try up to meshAttempts times while its packet is lost on
+// the way. When node to rejects the session passkey, it fetches a new one
+// and tries once more.
 func (c *Client) meshRetry(ctx context.Context, to uint32, try func() error) error {
 	refreshed := false
 	var err error
@@ -44,7 +53,7 @@ func (c *Client) meshRetry(ctx context.Context, to uint32, try func() error) err
 		switch {
 		case err == nil:
 			return nil
-		case errors.Is(err, ErrNoAnswer):
+		case lostOnTheWay(err):
 			attempt++
 		case errors.As(err, &re) && re.Reason == pb.Routing_ADMIN_BAD_SESSION_KEY && !refreshed:
 			refreshed = true

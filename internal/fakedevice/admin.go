@@ -93,10 +93,14 @@ func (d *Device) handleAdmin(l *link, st *linkState, p *pb.MeshPacket, m *pb.Adm
 			return false
 		}
 		d.mu.Lock()
-		delay := d.RebootDelay
+		delay, silent := d.RebootDelay, d.SilentReboot
 		d.mu.Unlock()
 		if _, reset := m.PayloadVariant.(*pb.AdminMessage_NodedbReset); reboot && reset && delay > 0 {
 			time.AfterFunc(delay, func() {
+				if silent {
+					l.dead.Store(true)
+					return
+				}
 				l.emit(&pb.FromRadio{PayloadVariant: &pb.FromRadio_Rebooted{Rebooted: true}})
 				l.close()
 			})

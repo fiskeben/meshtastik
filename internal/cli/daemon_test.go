@@ -55,6 +55,18 @@ func (td *testDaemon) start(t *testing.T) {
 	go func() { defer close(td.done); srv.Serve(ctx, ln) }()
 }
 
+// waitNoClients waits until the daemon has noticed every command hang up.
+func (td *testDaemon) waitNoClients(t *testing.T) {
+	t.Helper()
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		r, err := daemon.Request(context.Background(), td.sock, daemon.Hello{Op: daemon.OpStatus})
+		if err == nil && (len(r.Status.Links) == 0 || r.Status.Links[0].Clients == 0) {
+			return
+		}
+	}
+	t.Fatal("daemon still has clients")
+}
+
 func (td *testDaemon) stop() {
 	if td.cancel != nil {
 		td.cancel()
@@ -126,6 +138,7 @@ func TestListenThroughTheDaemonGetsWhatArrivedMeanwhile(t *testing.T) {
 	if err != nil || !strings.Contains(out, ": queued") {
 		t.Fatal(out, err)
 	}
+	td.waitNoClients(t) // a packet that arrives while listen is still attached goes to it
 	d.Inject(text(42, 0xffffffff, "between runs"))
 	time.Sleep(50 * time.Millisecond)
 	out, _, err = td.run(t, context.Background(), "listen", "--json", "--raw")

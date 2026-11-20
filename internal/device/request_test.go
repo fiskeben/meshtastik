@@ -54,7 +54,7 @@ func TestRequestRoutingError(t *testing.T) {
 	c, _, _ := withRemote(t, func(_ *fakedevice.Device, r *fakedevice.Remote) {
 		r.Unreachable, r.FailWith = true, pb.Routing_MAX_RETRANSMIT
 	})
-	_, err := c.Request(ctxT(t), hill, pb.PortNum_POSITION_APP, &pb.Position{}, device.RequestOptions{})
+	_, err := c.Request(ctxT(t), hill, pb.PortNum_POSITION_APP, &pb.Position{}, device.RequestOptions{WantAck: true})
 	var re *device.RoutingError
 	if !errors.As(err, &re) || re.Reason != pb.Routing_MAX_RETRANSMIT || !strings.Contains(err.Error(), "no route to !00000099") {
 		t.Fatal(err)
@@ -97,6 +97,13 @@ func TestRequestSendsOptions(t *testing.T) {
 	}
 }
 
+func TestNoResponseFromTheTarget(t *testing.T) {
+	got := (&device.RoutingError{From: hill, Dest: hill, Reason: pb.Routing_NO_RESPONSE}).Error()
+	if !strings.Contains(got, "!00000099 received the request but did not answer it") {
+		t.Fatal(got)
+	}
+}
+
 func TestRoutingErrorMessages(t *testing.T) {
 	for reason, want := range map[pb.Routing_Error]string{
 		pb.Routing_ADMIN_PUBLIC_KEY_UNAUTHORIZED: "admin-key add",
@@ -110,5 +117,48 @@ func TestRoutingErrorMessages(t *testing.T) {
 		if got := (&device.RoutingError{Dest: hill, Reason: reason}).Error(); !strings.Contains(got, want) {
 			t.Errorf("%s: %q lacks %q", reason, got, want)
 		}
+	}
+}
+
+func TestRequestDefaultsHopLimitToTheNodes(t *testing.T) {
+	c, d, _ := withRemote(t, func(d *fakedevice.Device, _ *fakedevice.Remote) { d.Config.Lora.HopLimit = 5 })
+	if _, err := c.RequestPosition(ctxT(t), hill); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.RequestTelemetry(ctxT(t), hill, device.DeviceMetrics); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range d.RemoteRequests(hill) {
+		if p.GetHopLimit() != 5 {
+			t.Fatalf("hop limit %d, want the node's 5", p.GetHopLimit())
+		}
+	}
+}
+
+func TestRequestHopLimitFallsBackTo3(t *testing.T) {
+	c, d, _ := withRemote(t, func(d *fakedevice.Device, _ *fakedevice.Remote) { d.Config.Lora.HopLimit = 0 })
+	if _, err := c.RequestPosition(ctxT(t), hill); err != nil || d.RemoteRequests(hill)[0].GetHopLimit() != 3 {
+		t.Fatal(err, d.RemoteRequests(hill))
+	}
+}
+
+func TestRequestFailsOnRefusalNotification(t *testing.T) {
+	c, _, _ := withRemoteOpts(t, device.Options{MeshTimeout: 5 * time.Second}, func(d *fakedevice.Device, _ *fakedevice.Remote) {
+		d.RefuseSending = map[pb.PortNum]string{pb.PortNum_TRACEROUTE_APP: "TraceRoute can only be sent once every 30 seconds"}
+	})
+	start := time.Now()
+	_, err := c.Traceroute(ctxT(t), hill, 3)
+	if !errors.Is(err, device.ErrNotSent) || !strings.Contains(err.Error(), "once every 30 seconds") || time.Since(start) > time.Second {
+		t.Fatal(err, time.Since(start))
+	}
+}
+
+func TestPositionNoAnswerExplainsLimits(t *testing.T) {
+	c, _, _ := withRemote(t, func(_ *fakedevice.Device, r *fakedevice.Remote) { r.Unreachable = true })
+	if _, err := c.RequestPosition(ctxT(t), hill); !errors.Is(err, device.ErrNoAnswer) || !strings.Contains(err.Error(), "3 minutes") {
+		t.Fatal(err)
+	}
+	if _, err := c.RequestTelemetry(ctxT(t), hill, device.DeviceMetrics); !errors.Is(err, device.ErrNoAnswer) || !strings.Contains(err.Error(), "10 seconds") {
+		t.Fatal(err)
 	}
 }

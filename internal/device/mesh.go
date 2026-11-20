@@ -2,6 +2,7 @@ package device
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
@@ -56,7 +57,7 @@ func RouteFrom(me, to uint32, rd *pb.RouteDiscovery, hopStart uint32) *Route {
 // Traceroute traces the route to node to and back, within hopLimit hops.
 func (c *Client) Traceroute(ctx context.Context, to uint32, hopLimit uint32) (*Route, error) {
 	p, err := c.Request(ctx, to, pb.PortNum_TRACEROUTE_APP, &pb.RouteDiscovery{},
-		RequestOptions{HopLimit: hopLimit, Timeout: 2 * c.opts.MeshTimeout})
+		RequestOptions{HopLimit: hopLimit, WantAck: true, Timeout: 2 * c.opts.MeshTimeout}) // firmware asks for an ack on traceroutes anyway
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +105,10 @@ func (c *Client) RequestTelemetry(ctx context.Context, to uint32, kind Telemetry
 	case LocalStats:
 		req.Variant = &pb.Telemetry_LocalStats{LocalStats: &pb.LocalStats{}}
 	}
-	p, err := c.Request(ctx, to, pb.PortNum_TELEMETRY_APP, req, RequestOptions{})
+	p, err := c.Request(ctx, to, pb.PortNum_TELEMETRY_APP, req, RequestOptions{Timeout: 2 * c.opts.MeshTimeout})
+	if errors.Is(err, ErrNoAnswer) {
+		return nil, fmt.Errorf("%w (the connected node sends at most one telemetry request per 10 seconds)", err)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +121,11 @@ func (c *Client) RequestTelemetry(ctx context.Context, to uint32, kind Telemetry
 
 // RequestPosition asks node to for its position.
 func (c *Client) RequestPosition(ctx context.Context, to uint32) (*pb.Position, error) {
-	p, err := c.Request(ctx, to, pb.PortNum_POSITION_APP, &pb.Position{}, RequestOptions{})
+	p, err := c.Request(ctx, to, pb.PortNum_POSITION_APP, &pb.Position{}, RequestOptions{Timeout: 2 * c.opts.MeshTimeout})
+	if errors.Is(err, ErrNoAnswer) {
+		return nil, fmt.Errorf("%w (nodes answer position requests at most every 3 minutes, and the connected node "+
+			"sends at most one per 10 seconds)", err)
+	}
 	if err != nil {
 		return nil, err
 	}

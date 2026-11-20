@@ -225,6 +225,7 @@ type Client struct {
 
 	wmu     sync.Mutex
 	waiters map[uint32]chan *pb.MeshPacket // by request id
+	notes   map[uint32]chan string         // client notifications, by the packet id they reply to
 
 	packets packetQueue // every MeshPacket received, across reconnects, in its FromRadio
 
@@ -245,6 +246,7 @@ func Open(ctx context.Context, dial transport.Dialer, opts Options) (*Client, er
 		state:    newState(),
 		passkeys: map[uint32][]byte{},
 		waiters:  map[uint32]chan *pb.MeshPacket{},
+		notes:    map[uint32]chan string{},
 		packets:  packetQueue{wake: make(chan struct{}, 1)},
 	}
 	l, err := c.attach(conn)
@@ -516,6 +518,15 @@ func (c *Client) dispatch(l *link, m *pb.FromRadio) {
 			})
 		}
 		c.packets.push(m)
+	case *pb.FromRadio_ClientNotification:
+		if n := v.ClientNotification; n.HasReplyId() {
+			c.deliverNote(n.GetReplyId(), n.GetMessage())
+		}
+		if c.opts.OnMessage != nil {
+			c.opts.OnMessage(m)
+		} else {
+			fmt.Fprintf(c.opts.Log, "node: %s\n", v.ClientNotification.GetMessage())
+		}
 	default:
 		if c.opts.OnMessage != nil {
 			c.opts.OnMessage(m)
@@ -544,6 +555,31 @@ func (c *Client) removeWaiter(id uint32) {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
 	delete(c.waiters, id)
+	delete(c.notes, id)
+}
+
+// addNoteWaiter registers interest in client notifications replying to
+// packet id; removeWaiter ends it.
+func (c *Client) addNoteWaiter(id uint32) chan string {
+	ch := make(chan string, 1)
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	c.notes[id] = ch
+	return ch
+}
+
+// deliverNote hands a notification replying to packet id to its waiter, if
+// any, without blocking.
+func (c *Client) deliverNote(id uint32, msg string) {
+	c.wmu.Lock()
+	ch := c.notes[id]
+	c.wmu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- msg:
+		default:
+		}
+	}
 }
 
 // deliver hands p to the waiter for request id, if any, without blocking.

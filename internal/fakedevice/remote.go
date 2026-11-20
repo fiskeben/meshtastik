@@ -23,22 +23,35 @@ type Remote struct {
 	Config          *pb.LocalConfig
 	ModuleConfig    *pb.LocalModuleConfig
 	Channels        [8]*pb.Channel
-	AdminKeys       [][]byte // public keys allowed to administer it
-	Route           []uint32 // traceroute hops towards it (intermediate nodes)
-	RouteBack       []uint32 // traceroute hops back
-	Position        *pb.Position
+	AdminKeys       [][]byte      // public keys allowed to administer it
+	Route           []uint32      // traceroute hops towards it (intermediate nodes)
+	RouteBack       []uint32      // traceroute hops back
+	Position        *pb.Position  // nil: no position to share (requests get NO_RESPONSE)
 	Telemetry       *pb.Telemetry // answered for device metrics requests
+	// EnvironmentSensor, PowerSensor: without them, environment and power
+	// telemetry requests get NO_RESPONSE, as on a node lacking the sensor.
+	EnvironmentSensor, PowerSensor bool
 
-	Unreachable bool             // drop everything addressed to it
-	FailWith    pb.Routing_Error // with Unreachable: the local node answers this routing error
-	DropFirst   int              // drop this many packets to it, then deliver
-	DropAcks    int              // handle, but drop this many want_ack acks
+	Unreachable bool // drop everything addressed to it
+	// FailWith, with Unreachable: the local node answers this routing
+	// error. MAX_RETRANSMIT and TIMEOUT need want_ack (only acked packets
+	// are retransmitted); other packets then vanish.
+	FailWith pb.Routing_Error
+	// DropFirst loses this many packets on the way to it. As with real
+	// firmware, a lost want_ack packet ends in a local MAX_RETRANSMIT after
+	// the radio's retries; other packets vanish.
+	DropFirst int
+	// DropAcks: handle, but lose this many acks. Firmware acks only packets
+	// no module answered (an answer is the ack). DropAcksFor, when set,
+	// limits this to admin messages whose type starts with it ("set_").
+	DropAcks    int
+	DropAcksFor string
 	// RotatePasskeyOnce: after the first response, silently invalidate the
 	// issued passkey once, as when it expires.
 	RotatePasskeyOnce bool
 	Decoys            bool     // before each answer, emit one with a wrong request id and one from another node
 	IgnoreFields      []string // config paths whose new value is silently dropped when applied
-	RebootOnCommit    bool     // after commit: unreachable for RebootFor
+	RebootOnCommit    bool     // after commit: unreachable for RebootFor (want_ack packets get a local MAX_RETRANSMIT)
 	RebootFor         time.Duration
 	Latency           time.Duration // before each answer
 
@@ -131,30 +144,35 @@ func (d *Device) toRemote(l *link, p *pb.MeshPacket) {
 	}()
 }
 
+// retransmitted reports whether reason is what the local node reports when
+// its own retransmissions of a want_ack packet went unanswered.
+func retransmitted(reason pb.Routing_Error) bool {
+	return reason == pb.Routing_MAX_RETRANSMIT || reason == pb.Routing_TIMEOUT
+}
+
 // remoteAnswers works out what comes back for p; d.mu must be held.
 func (d *Device) remoteAnswers(r *Remote, p *pb.MeshPacket) []*pb.FromRadio {
 	me, id, data := d.NodeNum, p.GetId(), p.GetDecoded()
-	if r.Unreachable || time.Now().Before(r.downUntil) {
-		if r.Unreachable && r.FailWith != pb.Routing_NONE {
-			return []*pb.FromRadio{routingReply(me, me, id, r.FailWith)}
+	lost := func() []*pb.FromRadio { // the packet never got there
+		if p.GetWantAck() {
+			return []*pb.FromRadio{routingReply(me, me, id, pb.Routing_MAX_RETRANSMIT)}
 		}
 		return nil
 	}
-	if r.DropFirst > 0 {
+	switch {
+	case r.Unreachable:
+		if r.FailWith == pb.Routing_NONE || retransmitted(r.FailWith) && !p.GetWantAck() {
+			return nil
+		}
+		return []*pb.FromRadio{routingReply(me, me, id, r.FailWith)}
+	case time.Now().Before(r.downUntil):
+		return lost()
+	case r.DropFirst > 0:
 		r.DropFirst--
-		return nil
+		return lost()
 	}
 	var out []*pb.FromRadio
-	ack := func() {
-		if !p.GetWantAck() {
-			return
-		}
-		if r.DropAcks > 0 {
-			r.DropAcks--
-			return
-		}
-		out = append(out, routingReply(r.Num, me, id, pb.Routing_NONE))
-	}
+	answered := false
 	answer := func(port pb.PortNum, m proto.Message) {
 		if r.Decoys {
 			out = append(out, packet(r.Num, me, id+1, port, m), packet(r.Num+1, me, id, port, m))
@@ -165,7 +183,12 @@ func (d *Device) remoteAnswers(r *Remote, p *pb.MeshPacket) []*pb.FromRadio {
 			a.GetPacket().HopStart = 3
 		}
 		out = append(out, a)
+		answered = true
 	}
+	refuse := func(from uint32, reason pb.Routing_Error) []*pb.FromRadio {
+		return []*pb.FromRadio{routingReply(from, me, id, reason)}
+	}
+	adminType := ""
 	switch data.GetPortnum() {
 	case pb.PortNum_ADMIN_APP:
 		var m pb.AdminMessage
@@ -173,17 +196,17 @@ func (d *Device) remoteAnswers(r *Remote, p *pb.MeshPacket) []*pb.FromRadio {
 			return nil
 		}
 		r.adminMsgs = append(r.adminMsgs, proto.Clone(&m).(*pb.AdminMessage))
+		adminType = oneofName(&m)
 		switch {
 		case len(r.Owner.GetPublicKey()) == 0:
-			return []*pb.FromRadio{routingReply(me, me, id, pb.Routing_PKI_UNKNOWN_PUBKEY)}
+			return refuse(me, pb.Routing_PKI_UNKNOWN_PUBKEY)
 		case !p.GetPkiEncrypted():
-			return []*pb.FromRadio{routingReply(r.Num, me, id, pb.Routing_NOT_AUTHORIZED)}
+			return refuse(r.Num, pb.Routing_NOT_AUTHORIZED)
 		case !slices.ContainsFunc(r.AdminKeys, func(k []byte) bool { return bytes.Equal(k, d.PublicKey) }):
-			return []*pb.FromRadio{routingReply(r.Num, me, id, pb.Routing_ADMIN_PUBLIC_KEY_UNAUTHORIZED)}
-		case !strings.HasPrefix(oneofName(&m), "get_") && (r.passkey == nil || !bytes.Equal(m.SessionPasskey, r.passkey)):
-			return []*pb.FromRadio{routingReply(r.Num, me, id, pb.Routing_ADMIN_BAD_SESSION_KEY)}
+			return refuse(r.Num, pb.Routing_ADMIN_PUBLIC_KEY_UNAUTHORIZED)
+		case !strings.HasPrefix(adminType, "get_") && (r.passkey == nil || !bytes.Equal(m.SessionPasskey, r.passkey)):
+			return refuse(r.Num, pb.Routing_ADMIN_BAD_SESSION_KEY)
 		}
-		ack()
 		if resp := d.remoteAdmin(r, &m); resp != nil {
 			if r.passkey == nil {
 				r.passkey = randomPasskey()
@@ -203,11 +226,9 @@ func (d *Device) remoteAnswers(r *Remote, p *pb.MeshPacket) []*pb.FromRadio {
 		for i := range len(r.RouteBack) + 1 {
 			rd.SnrBack = append(rd.SnrBack, int32(4*(10-i)))
 		}
-		ack()
 		answer(pb.PortNum_TRACEROUTE_APP, rd)
 	case pb.PortNum_POSITION_APP:
-		ack()
-		if data.GetWantResponse() {
+		if data.GetWantResponse() && r.Position != nil {
 			answer(pb.PortNum_POSITION_APP, r.Position)
 		}
 	case pb.PortNum_TELEMETRY_APP:
@@ -215,24 +236,40 @@ func (d *Device) remoteAnswers(r *Remote, p *pb.MeshPacket) []*pb.FromRadio {
 		if err := proto.Unmarshal(data.GetPayload(), &req); err != nil {
 			return nil
 		}
-		ack()
 		if !data.GetWantResponse() {
 			break
 		}
 		resp := &pb.Telemetry{Time: uint32(time.Now().Unix())}
 		switch req.Variant.(type) {
 		case *pb.Telemetry_EnvironmentMetrics:
-			resp.Variant = &pb.Telemetry_EnvironmentMetrics{EnvironmentMetrics: &pb.EnvironmentMetrics{}}
+			if !r.EnvironmentSensor {
+				break
+			}
+			resp.Variant = &pb.Telemetry_EnvironmentMetrics{EnvironmentMetrics: &pb.EnvironmentMetrics{Temperature: proto.Float32(21.5)}}
 		case *pb.Telemetry_PowerMetrics:
-			resp.Variant = &pb.Telemetry_PowerMetrics{PowerMetrics: &pb.PowerMetrics{}}
+			if !r.PowerSensor {
+				break
+			}
+			resp.Variant = &pb.Telemetry_PowerMetrics{PowerMetrics: &pb.PowerMetrics{Ch1Voltage: proto.Float32(4.1)}}
 		case *pb.Telemetry_LocalStats:
 			resp.Variant = &pb.Telemetry_LocalStats{LocalStats: &pb.LocalStats{}}
 		default:
 			resp.Variant = r.Telemetry.GetVariant()
 		}
-		answer(pb.PortNum_TELEMETRY_APP, resp)
-	default:
-		ack()
+		if resp.Variant != nil {
+			answer(pb.PortNum_TELEMETRY_APP, resp)
+		}
+	}
+	// The target NAKs a request no module answered.
+	if !answered && data.GetWantResponse() && data.GetPortnum() != pb.PortNum_ADMIN_APP {
+		return refuse(r.Num, pb.Routing_NO_RESPONSE)
+	}
+	if !answered && p.GetWantAck() { // an answer is the ack
+		if r.DropAcks > 0 && strings.HasPrefix(adminType, r.DropAcksFor) {
+			r.DropAcks--
+		} else {
+			out = append(out, routingReply(r.Num, me, id, pb.Routing_NONE))
+		}
 	}
 	return out
 }

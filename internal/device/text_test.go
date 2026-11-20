@@ -130,3 +130,15 @@ func TestSendTextRejectsSelfAndZero(t *testing.T) {
 		}
 	}
 }
+
+func TestSendTextBroadcastCarriesHopLimit(t *testing.T) {
+	d := fakedevice.New()
+	d.Config.Lora.HopLimit = 4
+	c := openFake(t, d)
+	if err := c.SendText(context.Background(), "hello all", Broadcast, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	if p := d.Texts()[0]; p.GetHopLimit() != 4 {
+		t.Fatalf("broadcast hop limit %d: firmware only fills it in for want_ack packets", p.GetHopLimit())
+	}
+}

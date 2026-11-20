@@ -79,7 +79,7 @@ func TestRemoteRequestGivesUp(t *testing.T) {
 }
 
 func TestRemotePostRetriesLostAck(t *testing.T) {
-	c, d, r := withRemote(t, func(_ *fakedevice.Device, r *fakedevice.Remote) { r.DropAcks = 2 }) // the passkey get loses one
+	c, d, r := withRemote(t, func(_ *fakedevice.Device, r *fakedevice.Remote) { r.DropAcks = 1 }) // the get is answered, so this is the set's ack
 	if err := device.PostTo(c, ctxT(t), hill, setHopLimit(6)); err != nil {
 		t.Fatal(err)
 	}

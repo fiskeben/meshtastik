@@ -107,9 +107,10 @@ func TestRequestTelemetryOutput(t *testing.T) {
 	if err != nil || !strings.Contains(out, "battery_level: 87\n") {
 		t.Fatalf("%q %v", out, err)
 	}
-	d := withHill(nil)
-	if _, _, err := runCLI(t, d, "", "request", "telemetry", "--type", "environment", "HIL1"); err != nil {
-		t.Fatal(err)
+	d := withHill(func(r *fakedevice.Remote) { r.EnvironmentSensor = true })
+	out, _, err = runCLI(t, d, "", "request", "telemetry", "--type", "environment", "HIL1")
+	if err != nil || !strings.Contains(out, "temperature: 21.5") {
+		t.Fatalf("%q %v", out, err)
 	}
 	var sent pb.Telemetry
 	if err := proto.Unmarshal(d.RemoteRequests(hillNum)[0].GetDecoded().GetPayload(), &sent); err != nil || sent.GetEnvironmentMetrics() == nil {
@@ -120,10 +121,26 @@ func TestRequestTelemetryOutput(t *testing.T) {
 	}
 }
 
+func TestRequestTelemetryWithoutSensor(t *testing.T) {
+	_, _, err := runCLI(t, withHill(nil), "", "request", "telemetry", "--type", "power", "HIL1")
+	if err == nil || !strings.Contains(err.Error(), "received the request but did not answer it") {
+		t.Fatal(err)
+	}
+}
+
 func TestTracerouteThroughDaemon(t *testing.T) {
 	td := newTestDaemon(t, withHill(nil))
 	out, _, err := td.run(t, context.Background(), "traceroute", "HIL1")
 	if err != nil || !strings.HasPrefix(out, "towards:  me → Relay (RLY1)") {
 		t.Fatal(out, err)
+	}
+}
+
+func TestTracerouteRefusedThroughDaemon(t *testing.T) {
+	d := withHill(nil)
+	d.RefuseSending = map[pb.PortNum]string{pb.PortNum_TRACEROUTE_APP: "TraceRoute can only be sent once every 30 seconds"}
+	td := newTestDaemon(t, d)
+	if _, _, err := td.run(t, context.Background(), "traceroute", "HIL1"); err == nil || !strings.Contains(err.Error(), "once every 30 seconds") {
+		t.Fatal(err)
 	}
 }

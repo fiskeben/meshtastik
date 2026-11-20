@@ -44,10 +44,11 @@ func (c *Client) SendText(ctx context.Context, text string, to uint32, channel u
 	}
 	l := c.current()
 	pkt := &pb.MeshPacket{
-		To:      to,
-		Channel: channel,
-		Id:      id,
-		WantAck: direct,
+		To:       to,
+		Channel:  channel,
+		Id:       id,
+		WantAck:  direct,
+		HopLimit: c.hopLimit(),
 		PayloadVariant: &pb.MeshPacket_Decoded{Decoded: &pb.Data{
 			Portnum: pb.PortNum_TEXT_MESSAGE_APP,
 			Payload: []byte(text),

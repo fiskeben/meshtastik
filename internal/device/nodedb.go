@@ -83,8 +83,9 @@ func (c *Client) EditNodeDB(ctx context.Context, op NodeOp, num uint32) error {
 
 // ResetNodeDB clears the node list, keeping favourites if asked (nodes in a
 // router or base role always keep them). The node always reboots, a few
-// seconds later; ResetNodeDB waits up to Options.RebootWait for that and
-// reconnects.
+// seconds later; ResetNodeDB waits for that, or Options.RebootWait when the
+// link does not show it (over TCP the node neither says so nor closes the
+// socket), and reconnects.
 func (c *Client) ResetNodeDB(ctx context.Context, keepFavorites bool) error {
 	c.applyMu.Lock()
 	defer c.applyMu.Unlock()
@@ -97,8 +98,7 @@ func (c *Client) ResetNodeDB(ctx context.Context, keepFavorites bool) error {
 	select {
 	case <-l.rebooted:
 	case <-l.readerEnd:
-	case <-t.C:
-		return fmt.Errorf("node list reset sent, but the node did not reboot within %s", c.opts.RebootWait)
+	case <-t.C: // past the firmware's reboot delay: the link is stale
 	case <-ctx.Done():
 		return ctx.Err()
 	}

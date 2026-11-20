@@ -141,14 +141,14 @@ func TestRemoteAnswersTraceroute(t *testing.T) {
 
 func TestRemoteAnswersOwnerWithPasskey(t *testing.T) {
 	g := newRig(t, nil)
-	ps := g.admin(getOwner)
-	if len(ps) != 2 || routing(t, ps[0]) != pb.Routing_NONE || ps[0].GetFrom() != remoteNum {
+	ps := g.admin(getOwner) // the answer is the ack: firmware sends no second one
+	if len(ps) != 1 {
 		t.Fatal(ps)
 	}
-	m := adminOf(t, ps[1])
-	if m.GetGetOwnerResponse().GetLongName() != "Hill" || len(m.SessionPasskey) != 8 || !ps[1].GetPkiEncrypted() ||
-		ps[1].GetTo() != g.d.NodeNum || ps[1].GetDecoded().GetRequestId() != g.id {
-		t.Fatal(ps[1], m)
+	m := adminOf(t, ps[0])
+	if m.GetGetOwnerResponse().GetLongName() != "Hill" || len(m.SessionPasskey) != 8 || !ps[0].GetPkiEncrypted() ||
+		ps[0].GetFrom() != remoteNum || ps[0].GetTo() != g.d.NodeNum || ps[0].GetDecoded().GetRequestId() != g.id {
+		t.Fatal(ps[0], m)
 	}
 }
 
@@ -177,7 +177,7 @@ func TestRemoteNeedsPasskeyForSets(t *testing.T) {
 	if len(ps) != 1 || routing(t, ps[0]) != pb.Routing_ADMIN_BAD_SESSION_KEY {
 		t.Fatal(ps)
 	}
-	key := adminOf(t, g.admin(getOwner)[1]).SessionPasskey
+	key := adminOf(t, g.admin(getOwner)[0]).SessionPasskey
 	set := hopLimit(5)
 	set.SessionPasskey = key
 	if ps := g.admin(set); len(ps) != 1 || routing(t, ps[0]) != pb.Routing_NONE {
@@ -214,39 +214,51 @@ func TestRemoteFailWith(t *testing.T) {
 	if len(ps) != 1 || routing(t, ps[0]) != pb.Routing_MAX_RETRANSMIT || ps[0].GetFrom() != g.d.NodeNum {
 		t.Fatal(ps)
 	}
+	// Retransmission needs want_ack: without it nothing comes back.
+	if ps := g.send(pb.PortNum_POSITION_APP, &pb.Position{}, false, false, true); len(ps) != 0 {
+		t.Fatal(ps)
+	}
 }
 
 func TestRemoteDropFirst(t *testing.T) {
-	g := newRig(t, func(_ *fakedevice.Device, r *fakedevice.Remote) { r.DropFirst = 1 })
-	if ps := g.admin(getOwner); len(ps) != 0 {
+	g := newRig(t, func(_ *fakedevice.Device, r *fakedevice.Remote) { r.DropFirst = 2 })
+	// A lost want_ack packet ends in the local node giving up; others vanish.
+	if ps := g.admin(getOwner); len(ps) != 1 || routing(t, ps[0]) != pb.Routing_MAX_RETRANSMIT || ps[0].GetFrom() != g.d.NodeNum {
 		t.Fatal(ps)
 	}
-	if ps := g.admin(getOwner); len(ps) != 2 {
+	if ps := g.send(pb.PortNum_POSITION_APP, &pb.Position{}, false, false, true); len(ps) != 0 {
+		t.Fatal(ps)
+	}
+	if ps := g.admin(getOwner); len(ps) != 1 || adminOf(t, ps[0]).GetGetOwnerResponse() == nil {
 		t.Fatal(ps)
 	}
 }
 
 func TestRemoteDropAcksStillApplies(t *testing.T) {
-	g := newRig(t, func(_ *fakedevice.Device, r *fakedevice.Remote) { r.DropAcks = 1 })
-	key := adminOf(t, g.admin(getOwner)[0]).SessionPasskey // its ack was the dropped one
-	set := hopLimit(6)
-	set.SessionPasskey = key
-	if ps := g.admin(set); len(ps) != 1 || routing(t, ps[0]) != pb.Routing_NONE {
+	g := newRig(t, func(_ *fakedevice.Device, r *fakedevice.Remote) { r.DropAcks, r.DropAcksFor = 1, "set_" })
+	key := adminOf(t, g.admin(getOwner)[0]).SessionPasskey
+	begin := &pb.AdminMessage{SessionPasskey: key, PayloadVariant: &pb.AdminMessage_BeginEditSettings{BeginEditSettings: true}}
+	if ps := g.admin(begin); len(ps) != 1 || routing(t, ps[0]) != pb.Routing_NONE { // not a set_: acked
 		t.Fatal(ps)
 	}
-	if g.r.Config.GetLora().GetHopLimit() != 6 {
-		t.Fatal(g.r.Config.GetLora())
+	set := hopLimit(6)
+	set.SessionPasskey = key
+	if ps := g.admin(set); len(ps) != 0 { // the set's ack is lost
+		t.Fatal(ps)
+	}
+	if ps := g.admin(set); len(ps) != 1 || routing(t, ps[0]) != pb.Routing_NONE {
+		t.Fatal(ps)
 	}
 }
 
 func TestRemoteRotatePasskeyOnce(t *testing.T) {
 	g := newRig(t, func(_ *fakedevice.Device, r *fakedevice.Remote) { r.RotatePasskeyOnce = true })
 	set := hopLimit(5)
-	set.SessionPasskey = adminOf(t, g.admin(getOwner)[1]).SessionPasskey
+	set.SessionPasskey = adminOf(t, g.admin(getOwner)[0]).SessionPasskey
 	if ps := g.admin(set); len(ps) != 1 || routing(t, ps[0]) != pb.Routing_ADMIN_BAD_SESSION_KEY {
 		t.Fatal(ps)
 	}
-	set.SessionPasskey = adminOf(t, g.admin(getOwner)[1]).SessionPasskey
+	set.SessionPasskey = adminOf(t, g.admin(getOwner)[0]).SessionPasskey
 	if ps := g.admin(set); len(ps) != 1 || routing(t, ps[0]) != pb.Routing_NONE {
 		t.Fatal(ps)
 	}
@@ -266,7 +278,7 @@ func TestRemoteBlanksPrivateKey(t *testing.T) {
 		r.Config.Security.PrivateKey = bytes.Repeat([]byte{1}, 32)
 	})
 	ps := g.admin(&pb.AdminMessage{PayloadVariant: &pb.AdminMessage_GetConfigRequest{GetConfigRequest: pb.AdminMessage_SECURITY_CONFIG}})
-	sec := adminOf(t, ps[1]).GetGetConfigResponse().GetSecurity()
+	sec := adminOf(t, ps[0]).GetGetConfigResponse().GetSecurity()
 	if sec == nil || len(sec.PrivateKey) != 0 || len(sec.PublicKey) != 32 {
 		t.Fatal(sec)
 	}
@@ -275,12 +287,12 @@ func TestRemoteBlanksPrivateKey(t *testing.T) {
 func TestRemoteModuleConfigAndChannel(t *testing.T) {
 	g := newRig(t, nil)
 	ps := g.admin(&pb.AdminMessage{PayloadVariant: &pb.AdminMessage_GetModuleConfigRequest{GetModuleConfigRequest: pb.AdminMessage_EXTNOTIF_CONFIG}})
-	if adminOf(t, ps[1]).GetGetModuleConfigResponse().GetExternalNotification() == nil {
-		t.Fatal(ps[1])
+	if adminOf(t, ps[0]).GetGetModuleConfigResponse().GetExternalNotification() == nil {
+		t.Fatal(ps[0])
 	}
 	ps = g.admin(&pb.AdminMessage{PayloadVariant: &pb.AdminMessage_GetChannelRequest{GetChannelRequest: 1}})
-	if adminOf(t, ps[1]).GetGetChannelResponse().GetRole() != pb.Channel_PRIMARY {
-		t.Fatal(ps[1])
+	if adminOf(t, ps[0]).GetGetChannelResponse().GetRole() != pb.Channel_PRIMARY {
+		t.Fatal(ps[0])
 	}
 }
 
@@ -288,14 +300,14 @@ func TestRemoteRebootsAfterCommit(t *testing.T) {
 	g := newRig(t, func(_ *fakedevice.Device, r *fakedevice.Remote) {
 		r.RebootOnCommit, r.RebootFor = true, 300*time.Millisecond
 	})
-	key := adminOf(t, g.admin(getOwner)[1]).SessionPasskey
+	key := adminOf(t, g.admin(getOwner)[0]).SessionPasskey
 	commit := &pb.AdminMessage{SessionPasskey: key, PayloadVariant: &pb.AdminMessage_CommitEditSettings{CommitEditSettings: true}}
 	g.admin(commit)
-	if ps := g.admin(getOwner); len(ps) != 0 {
+	if ps := g.admin(getOwner); len(ps) != 1 || routing(t, ps[0]) != pb.Routing_MAX_RETRANSMIT {
 		t.Fatal("answered while rebooting", ps)
 	}
 	time.Sleep(300 * time.Millisecond)
-	if ps := g.admin(getOwner); len(ps) != 2 {
+	if ps := g.admin(getOwner); len(ps) != 1 || adminOf(t, ps[0]).GetGetOwnerResponse() == nil {
 		t.Fatal("not back after reboot", ps)
 	}
 }

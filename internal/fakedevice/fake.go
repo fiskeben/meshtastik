@@ -10,6 +10,7 @@ import (
 	"maps"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
@@ -48,9 +49,16 @@ type Device struct {
 
 	RequirePasskey bool // ignore non-get admin messages without the session passkey
 	IgnoreNodeOps  bool // accept node list admin messages (favorite, ignore, remove) without applying them
+	// RefuseSending: the node does not send packets to a remote on these
+	// ports, answering with a client notification carrying this message
+	// instead (as firmware rate limits do).
+	RefuseSending map[pb.PortNum]string
 	// RebootDelay: a node list reset reboots this long after the request
 	// instead of at once (firmware waits ~7 s).
-	RebootDelay  time.Duration
+	RebootDelay time.Duration
+	// SilentReboot: that reboot neither reports rebooted nor closes the link,
+	// which just stops answering, as over TCP.
+	SilentReboot bool
 	IgnoreFields []string // config paths whose new value is silently dropped when applied
 	// IgnoreFixedPositionCoords: set_fixed_position turns position.fixed_position
 	// on but keeps the old coordinates.
@@ -193,7 +201,8 @@ type link struct {
 	toClient chan *pb.FromRadio
 	done     chan struct{}
 	once     sync.Once
-	dial     int // number of the Dial that made it, from 1
+	dial     int         // number of the Dial that made it, from 1
+	dead     atomic.Bool // the node rebooted under it without closing it (TCP)
 }
 
 func newLink() *link {
@@ -285,7 +294,7 @@ func (d *Device) serve(l *link) {
 		}
 		adm := d.record(e.m)
 		close(e.seen)
-		if st.hung {
+		if st.hung || l.dead.Load() {
 			continue
 		}
 		switch v := e.m.PayloadVariant.(type) {
@@ -324,6 +333,17 @@ func (d *Device) serve(l *link) {
 			remote := d.isRemote(v.Packet)
 			d.mu.Unlock()
 			if remote {
+				d.mu.Lock()
+				msg, refused := d.RefuseSending[v.Packet.GetDecoded().GetPortnum()]
+				d.mu.Unlock()
+				if refused {
+					note := &pb.FromRadio{PayloadVariant: &pb.FromRadio_ClientNotification{ClientNotification: &pb.ClientNotification{
+						ReplyId: proto.Uint32(v.Packet.GetId()), Level: pb.LogRecord_WARNING, Message: msg}}}
+					if !l.emit(note) {
+						return
+					}
+					continue
+				}
 				d.toRemote(l, v.Packet)
 				continue
 			}

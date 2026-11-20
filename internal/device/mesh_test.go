@@ -1,7 +1,10 @@
 package device_test
 
 import (
+	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
 	"google.golang.org/protobuf/proto"
@@ -86,7 +89,7 @@ func TestRouteFromDiscovery(t *testing.T) {
 }
 
 func TestRequestTelemetryKinds(t *testing.T) {
-	c, d, r := withRemote(t, nil)
+	c, d, r := withRemote(t, func(_ *fakedevice.Device, r *fakedevice.Remote) { r.EnvironmentSensor, r.PowerSensor = true, true })
 	for i, kind := range []string{"device", "environment", "power", "local-stats"} {
 		k, err := device.ParseTelemetryKind(kind)
 		if err != nil {
@@ -120,5 +123,33 @@ func TestRequestPosition(t *testing.T) {
 	pos, err := c.RequestPosition(ctxT(t), hill)
 	if err != nil || pos.GetLatitudeI() != r.Position.GetLatitudeI() || pos.GetLongitudeI() != r.Position.GetLongitudeI() {
 		t.Fatal(pos, err)
+	}
+}
+
+func TestPositionAndTelemetryWaitTwiceMeshTimeout(t *testing.T) {
+	c, _, _ := withRemote(t, func(_ *fakedevice.Device, r *fakedevice.Remote) { r.Unreachable = true }) // MeshTimeout 200ms
+	start := time.Now()
+	if _, err := c.RequestPosition(ctxT(t), hill); err == nil || time.Since(start) < 400*time.Millisecond {
+		t.Fatal("position gave up after", time.Since(start), err)
+	}
+	start = time.Now()
+	if _, err := c.RequestTelemetry(ctxT(t), hill, device.DeviceMetrics); err == nil || time.Since(start) < 400*time.Millisecond {
+		t.Fatal("telemetry gave up after", time.Since(start), err)
+	}
+}
+
+func TestRequestTelemetryWithoutSensor(t *testing.T) {
+	c, _, _ := withRemote(t, nil)
+	_, err := c.RequestTelemetry(ctxT(t), hill, device.EnvironmentMetrics)
+	var re *device.RoutingError
+	if !errors.As(err, &re) || re.Reason != pb.Routing_NO_RESPONSE || !strings.Contains(err.Error(), "!00000099 received the request but did not answer it") {
+		t.Fatal(err)
+	}
+}
+
+func TestRequestPositionWithoutPosition(t *testing.T) {
+	c, _, _ := withRemote(t, func(_ *fakedevice.Device, r *fakedevice.Remote) { r.Position = nil })
+	if _, err := c.RequestPosition(ctxT(t), hill); err == nil || !strings.Contains(err.Error(), "did not answer it") {
+		t.Fatal(err)
 	}
 }

@@ -14,6 +14,10 @@ import (
 // answer in time.
 var ErrNoAnswer = errors.New("no answer")
 
+// ErrNotSent is returned (wrapped) when the connected node refuses to send a
+// packet, as its rate limits do, with the node's message.
+var ErrNotSent = errors.New("not sent")
+
 // RoutingError is a routing reply other than NONE to a packet for Dest.
 type RoutingError struct {
 	From   uint32 // the node that sent the reply
@@ -32,7 +36,12 @@ func (e *RoutingError) Error() string {
 			"public key in its security.admin_key)", dest)
 	case pb.Routing_PKI_UNKNOWN_PUBKEY, pb.Routing_PKI_SEND_FAIL_PUBLIC_KEY:
 		return fmt.Sprintf("this node has no public key for %s yet; wait until it has heard %s's node info", dest, dest)
-	case pb.Routing_NO_ROUTE, pb.Routing_MAX_RETRANSMIT, pb.Routing_NO_RESPONSE, pb.Routing_TIMEOUT:
+	case pb.Routing_NO_RESPONSE:
+		if e.From == e.Dest { // the target got it, but nothing on it answered
+			return fmt.Sprintf("%s received the request but did not answer it (no such sensor, or no position to share)", dest)
+		}
+		return fmt.Sprintf("no route to %s (%s)", dest, e.Reason)
+	case pb.Routing_NO_ROUTE, pb.Routing_MAX_RETRANSMIT, pb.Routing_TIMEOUT:
 		return fmt.Sprintf("no route to %s (%s)", dest, e.Reason)
 	case pb.Routing_ADMIN_BAD_SESSION_KEY:
 		return fmt.Sprintf("%s rejected the admin session key", dest)
@@ -40,6 +49,22 @@ func (e *RoutingError) Error() string {
 		return fmt.Sprintf("%s is rate-limiting requests; try again in a while", dest)
 	}
 	return fmt.Sprintf("delivery to %s failed: %s", dest, e.Reason)
+}
+
+// defaultHopLimit is used when the node's lora.hop_limit is unset, as
+// firmware does.
+const defaultHopLimit = 3
+
+// hopLimit is the hop limit for packets this client originates: the node's
+// lora.hop_limit. Firmware fills in a zero hop limit only for want_ack
+// packets; any other packet would reach direct neighbours only.
+func (c *Client) hopLimit() uint32 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if h := c.state.Config.GetLora().GetHopLimit(); h != 0 {
+		return h
+	}
+	return defaultHopLimit
 }
 
 // routingReason decodes the error reason of a ROUTING_APP packet.
@@ -54,7 +79,7 @@ func routingReason(p *pb.MeshPacket) (pb.Routing_Error, error) {
 // RequestOptions tunes Request; zero values select the defaults.
 type RequestOptions struct {
 	Channel  uint32
-	HopLimit uint32 // 0: the node's default
+	HopLimit uint32 // 0: the node's lora.hop_limit
 	PKI      bool   // pki_encrypted
 	WantAck  bool
 	Timeout  time.Duration // 0: Options.MeshTimeout
@@ -90,9 +115,13 @@ func (c *Client) meshSend(ctx context.Context, to uint32, port pb.PortNum, paylo
 	if err != nil {
 		return nil, fmt.Errorf("encode request: %w", err)
 	}
+	if o.HopLimit == 0 {
+		o.HopLimit = c.hopLimit()
+	}
 	id := randomID()
 	responses := c.addWaiter(id)
 	defer c.removeWaiter(id)
+	notes := c.addNoteWaiter(id)
 	l := c.current()
 	pkt := &pb.MeshPacket{
 		To:           to,
@@ -136,6 +165,8 @@ func (c *Client) meshSend(ctx context.Context, to uint32, port pb.PortNum, paylo
 				continue
 			}
 			return p, nil
+		case msg := <-notes:
+			return nil, fmt.Errorf("%w to !%08x: the connected node says: %s", ErrNotSent, to, msg)
 		case <-l.readerEnd:
 			return nil, fmt.Errorf("request: %w", l.readErr)
 		case <-t.C:

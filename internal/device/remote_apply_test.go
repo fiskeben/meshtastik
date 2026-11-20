@@ -63,12 +63,12 @@ func TestRemoteApplyVerified(t *testing.T) {
 func TestRemoteApplyRetriesLostAck(t *testing.T) {
 	n, d, r := remoteNode(t, fastMesh, nil)
 	ch := loraChange(t, n, 6)
-	d.Update(func() { r.DropAcks = 2 }) // the re-read's ack, then begin's: applied, unacknowledged, sent again
+	d.Update(func() { r.DropAcks, r.DropAcksFor = 1, "set_" }) // the set is applied but its ack is lost: sent again
 	if got, err := n.Apply(ctxT(t), []device.Change{ch}); err != nil || got != 1 {
 		t.Fatal(got, err)
 	}
 	ms := d.RemoteAdmin(hill)
-	if r.Config.GetLora().GetHopLimit() != 6 || count(ms, "begin_edit_settings") != 2 || count(ms, "set_config") != 1 {
+	if r.Config.GetLora().GetHopLimit() != 6 || count(ms, "begin_edit_settings") != 1 || count(ms, "set_config") != 2 {
 		t.Fatal(r.Config.GetLora(), count(ms, "begin_edit_settings"), count(ms, "set_config"))
 	}
 }

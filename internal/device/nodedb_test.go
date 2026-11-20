@@ -2,7 +2,6 @@ package device_test
 
 import (
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -110,12 +109,15 @@ func TestResetNodeDBWaitsForDelayedReboot(t *testing.T) {
 	}
 }
 
-func TestResetNodeDBWithoutReboot(t *testing.T) {
+func TestResetNodeDBOverTCP(t *testing.T) {
 	d := withCar()
-	d.RebootDelay = time.Hour
-	c, _ := openA(t, d, device.Options{RebootWait: 100 * time.Millisecond})
-	err := c.ResetNodeDB(ctxT(t), false)
-	if err == nil || !strings.Contains(err.Error(), "did not reboot within 100ms") {
+	// Over TCP a rebooting node neither says so nor closes the socket.
+	d.RebootDelay, d.SilentReboot = 100*time.Millisecond, true
+	c, _ := openA(t, d, device.Options{RebootWait: 300 * time.Millisecond})
+	if err := c.ResetNodeDB(ctxT(t), false); err != nil {
 		t.Fatal(err)
+	}
+	if _, ok := c.State().Nodes[42]; ok || d.Dials() != 2 {
+		t.Fatal("not reconnected after the silent reboot", d.Dials())
 	}
 }
