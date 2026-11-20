@@ -7,9 +7,6 @@ import (
 
 	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/reflect/protoreflect"
-
-	"meshtastik/internal/configpath"
 )
 
 // passkey is the admin session passkey the fake hands out.
@@ -109,11 +106,8 @@ func (d *Device) admin(st *linkState, m *pb.AdminMessage) (*pb.AdminMessage, boo
 	case *pb.AdminMessage_GetConfigRequest:
 		return &pb.AdminMessage{PayloadVariant: &pb.AdminMessage_GetConfigResponse{GetConfigResponse: d.configSection(v.GetConfigRequest)}}, false
 	case *pb.AdminMessage_GetChannelRequest:
-		ch := &pb.Channel{}
 		d.mu.Lock()
-		if i := int(v.GetChannelRequest) - 1; i >= 0 && i < len(d.Channels) && d.Channels[i] != nil {
-			ch = proto.Clone(d.Channels[i]).(*pb.Channel)
-		}
+		ch := d.local().channel(v.GetChannelRequest)
 		d.mu.Unlock()
 		return &pb.AdminMessage{PayloadVariant: &pb.AdminMessage_GetChannelResponse{GetChannelResponse: ch}}, false
 	case *pb.AdminMessage_BeginEditSettings:
@@ -211,71 +205,22 @@ func (d *Device) reply(l *link, req *pb.MeshPacket, resp *pb.AdminMessage) bool 
 	return l.emit(&pb.FromRadio{PayloadVariant: &pb.FromRadio_Packet{Packet: pkt}})
 }
 
+// local is the device's own configuration as a nodeConfig; d.mu must be held.
+func (d *Device) local() nodeConfig {
+	return nodeConfig{cfg: d.Config, mod: d.ModuleConfig, channels: &d.Channels, owner: &d.Owner, position: &d.Position,
+		ignoreFields: d.IgnoreFields, ignoreCoords: d.IgnoreFixedPositionCoords}
+}
+
 // configSection answers get_config_request for type t.
 func (d *Device) configSection(t pb.AdminMessage_ConfigType) *pb.Config {
-	if t == pb.AdminMessage_SESSIONKEY_CONFIG {
-		return &pb.Config{PayloadVariant: &pb.Config_Sessionkey{Sessionkey: &pb.Config_SessionkeyConfig{}}}
-	}
-	name := strings.ToLower(strings.TrimSuffix(t.String(), "_CONFIG")) // LORA_CONFIG → lora
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	for _, c := range configpath.ConfigSections(d.Config) {
-		if oneofName(c) == name {
-			return c
-		}
-	}
-	return &pb.Config{}
+	return d.local().section(t)
 }
 
 // applySet applies one set_* message to the device, minus IgnoreFields.
 func (d *Device) applySet(m *pb.AdminMessage) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	switch v := m.PayloadVariant.(type) {
-	case *pb.AdminMessage_SetConfig:
-		c := proto.Clone(v.SetConfig).(*pb.Config)
-		d.keepIgnored(c.ProtoReflect(), d.Config.ProtoReflect())
-		configpath.MergeConfig(d.Config, c)
-	case *pb.AdminMessage_SetModuleConfig:
-		c := proto.Clone(v.SetModuleConfig).(*pb.ModuleConfig)
-		d.keepIgnored(c.ProtoReflect(), d.ModuleConfig.ProtoReflect())
-		configpath.MergeModuleConfig(d.ModuleConfig, c)
-	case *pb.AdminMessage_SetChannel:
-		if i := v.SetChannel.GetIndex(); i >= 0 && int(i) < len(d.Channels) {
-			d.Channels[i] = proto.Clone(v.SetChannel).(*pb.Channel)
-		}
-	case *pb.AdminMessage_SetOwner:
-		d.Owner = proto.Clone(v.SetOwner).(*pb.User)
-	case *pb.AdminMessage_SetFixedPosition:
-		if d.Config.Position == nil {
-			d.Config.Position = &pb.Config_PositionConfig{}
-		}
-		d.Config.Position.FixedPosition = true
-		if !d.IgnoreFixedPositionCoords {
-			d.Position = proto.Clone(v.SetFixedPosition).(*pb.Position)
-		}
-	}
-}
-
-// keepIgnored resets each IgnoreFields path in the section carried by
-// wrapper to its current value in local, so the write is silently dropped.
-func (d *Device) keepIgnored(wrapper, local protoreflect.Message) {
-	for _, path := range d.IgnoreFields {
-		p, err := configpath.Parse(path)
-		if err != nil || p.Field == "" {
-			continue
-		}
-		name := protoreflect.Name(p.Section)
-		wf, lf := wrapper.Descriptor().Fields().ByName(name), local.Descriptor().Fields().ByName(name)
-		if wf == nil || lf == nil || !wrapper.Has(wf) {
-			continue
-		}
-		old, err := configpath.FormatField(local.Get(lf).Message(), p.Field)
-		if err != nil {
-			continue
-		}
-		if err := configpath.SetField(wrapper.Mutable(wf).Message(), p.Field, old); err != nil {
-			panic(err)
-		}
-	}
+	d.local().apply(m)
 }

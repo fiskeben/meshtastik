@@ -4,8 +4,11 @@ package fakedevice
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -29,6 +32,12 @@ type Device struct {
 	ModuleConfig    *pb.LocalModuleConfig
 	Channels        [8]*pb.Channel
 	ExtraNodes      []*pb.NodeInfo
+	// Remotes are nodes reached through the radio (see Remote); each is
+	// listed in the handshake with its public key.
+	Remotes map[uint32]*Remote
+	// PublicKey is the node's own public key, also reported as
+	// security.public_key; remotes check it against their admin keys.
+	PublicKey       []byte
 	Silent          bool // never answer want_config
 	StaleCompleteID bool // send one config_complete_id with a wrong nonce first
 	AckTexts        bool // answer a direct text message with a ROUTING_APP ack from the destination
@@ -81,6 +90,7 @@ type Device struct {
 	handshakeReboots int   // pending HandshakeReboots
 	cur              *link // link of the latest successful Dial
 	backlogSent      bool
+	wantConfigs      int // want_config requests answered
 }
 
 // New returns a Device with the default identity and configuration.
@@ -101,6 +111,11 @@ func New() *Device {
 	d.Config.Lora.UsePreset = true
 	d.Config.Bluetooth.Enabled = true
 	d.Config.Security.SerialEnabled = true
+	d.PublicKey = make([]byte, 32)
+	rand.Read(d.PublicKey)
+	d.Config.Security.PublicKey = d.PublicKey
+	d.Config.Security.PrivateKey = make([]byte, 32) // a real node holds both halves
+	rand.Read(d.Config.Security.PrivateKey)
 	for i := range d.Channels {
 		ch := &pb.Channel{Index: int32(i), Role: pb.Channel_DISABLED}
 		if i == 0 {
@@ -302,6 +317,13 @@ func (d *Device) serve(l *link) {
 				time.AfterFunc(after, func() { l.close() })
 			}
 		case *pb.ToRadio_Packet:
+			d.mu.Lock()
+			remote := d.isRemote(v.Packet)
+			d.mu.Unlock()
+			if remote {
+				d.toRemote(l, v.Packet)
+				continue
+			}
 			if adm != nil && !d.handleAdmin(l, &st, v.Packet, adm) {
 				return
 			}
@@ -320,6 +342,9 @@ func (d *Device) record(m *pb.ToRadio) *pb.AdminMessage {
 	if m.GetHeartbeat() != nil {
 		d.heartbeats++
 		return nil
+	}
+	if m.GetPacket() != nil && d.isRemote(m.GetPacket()) {
+		return nil // recorded by toRemote
 	}
 	data := m.GetPacket().GetDecoded()
 	if data.GetPortnum() == pb.PortNum_TEXT_MESSAGE_APP {
@@ -352,6 +377,11 @@ func (d *Device) handshake(l *link, nonce uint32) bool {
 	for _, n := range d.ExtraNodes {
 		msgs = append(msgs, &pb.FromRadio{PayloadVariant: &pb.FromRadio_NodeInfo{NodeInfo: n}})
 	}
+	for _, num := range slices.Sorted(maps.Keys(d.Remotes)) {
+		r := d.Remotes[num]
+		msgs = append(msgs, &pb.FromRadio{PayloadVariant: &pb.FromRadio_NodeInfo{NodeInfo: &pb.NodeInfo{Num: num, User: r.Owner}}})
+	}
+	d.wantConfigs++
 	for _, c := range configpath.ConfigSections(d.Config) {
 		msgs = append(msgs, &pb.FromRadio{PayloadVariant: &pb.FromRadio_Config{Config: c}})
 	}
@@ -379,6 +409,13 @@ func (d *Device) handshake(l *link, nonce uint32) bool {
 		}
 	}
 	return true
+}
+
+// WantConfigs reports how many want_config requests the device has answered.
+func (d *Device) WantConfigs() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.wantConfigs
 }
 
 // Inject emits p as a received packet on the current link; a no-op when
