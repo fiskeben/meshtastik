@@ -83,7 +83,8 @@ type Server struct {
 	recent    *recent
 	clients   map[*client]struct{}
 	statePath string
-	dirty     bool // memberships changed since last saved
+	dirty     bool         // memberships changed since last saved
+	sendQ     chan sendJob // to the current sender; nil while the link is down
 	wg        sync.WaitGroup
 }
 

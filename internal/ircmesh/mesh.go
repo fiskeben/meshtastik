@@ -19,7 +19,15 @@ func (s *Server) meshOptions() device.Options {
 
 // startMesh starts consuming the node connection m, and aging memberships.
 func (s *Server) startMesh(ctx context.Context, m Mesh) {
-	s.wg.Add(2)
+	q := make(chan sendJob, sendQueueLen)
+	s.mu.Lock()
+	s.sendQ = q
+	s.mu.Unlock()
+	s.wg.Add(3)
+	go func() {
+		defer s.wg.Done()
+		s.sender(ctx, m, q)
+	}()
 	go func() {
 		defer s.wg.Done()
 		err := m.Listen(ctx, func(fr *pb.FromRadio) error {
