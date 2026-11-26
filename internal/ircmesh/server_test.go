@@ -36,7 +36,7 @@ func TestCapServerTime(t *testing.T) {
 	h := newHarness(t, newFake(), nil)
 	c := h.dial(t)
 	c.send("CAP LS 302")
-	c.expect(`^:ircmesh CAP \* LS :?server-time$`)
+	c.expect(`^:ircmesh CAP \* LS :batch draft/chathistory message-tags server-time$`)
 	c.send("NICK foo")
 	c.send("USER u 0 * :r")
 	c.expectNone(` 001 `, 300*time.Millisecond)

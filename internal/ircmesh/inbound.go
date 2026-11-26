@@ -36,45 +36,77 @@ func (s *Server) packet(p *pb.MeshPacket) {
 	}
 }
 
-// text delivers a text packet, or keeps it for replay when no client is
-// attached. The caller holds s.mu.
+// text records a text packet in the history and delivers it. The caller
+// holds s.mu.
 func (s *Server) text(p *pb.MeshPacket) {
 	from, to := p.GetFrom(), p.GetTo()
 	ch := int(p.GetChannel())
-	var target string
-	var key replayKey
-	dm := false
+	var key histKey
 	switch {
 	case to == device.Broadcast:
-		name, ok := s.names[ch]
-		if !ok {
+		if _, ok := s.names[ch]; !ok {
 			return
 		}
-		target, key = name, replayKey{Channel: ch}
+		key = histKey{Channel: ch}
 	case from == s.self: // sent by another daemon client
-		target, key = s.dir.nick(to), replayKey{Channel: -1, Peer: to}
+		key = histKey{Channel: -1, Peer: to}
 	case to == s.self:
-		target, key, dm = s.selfNick(), replayKey{Channel: -1, Peer: from}, true
+		key = histKey{Channel: -1, Peer: from}
 	default:
 		return
 	}
 	lines, action := renderText(p.GetDecoded(), s.recent)
 	s.recent.add(p.GetId(), strings.Join(meshLines(p.GetDecoded().GetPayload()), " "))
-	clients := s.registered()
 	for _, l := range lines {
 		if action {
 			l = irc.CTCP("ACTION", l)
 		}
-		m := irc.Message{Prefix: s.dir.mask(from), Command: "PRIVMSG", Params: []string{target, l}}
-		if len(clients) == 0 {
-			s.replay.add(key, replayEntry{At: s.cfg.Now(), Msg: m, DM: dm})
-			continue
-		}
-		for _, c := range clients {
+		e := s.history.add(key, from, l, s.cfg.Now())
+		for _, c := range s.registered() {
 			if key.Channel < 0 || !c.parted[ch] {
-				c.queue(m)
+				s.deliver(c, e, "")
 			}
 		}
+	}
+}
+
+// histMessage is e as c sees it: from the sender's current nick, to the
+// channel or to the other end of the DM, with the tags c asked for and the
+// batch reference unless empty. ok is false when e's channel is gone. The
+// caller holds s.mu.
+func (s *Server) histMessage(c *client, e histEntry, batch string) (m irc.Message, ok bool) {
+	var target string
+	switch {
+	case e.Key.Channel >= 0:
+		if target, ok = s.names[e.Key.Channel]; !ok {
+			return irc.Message{}, false
+		}
+	case e.From == s.self:
+		target = s.dir.nick(e.Key.Peer)
+	default:
+		target = s.selfNick()
+	}
+	m = irc.Message{Prefix: s.dir.mask(e.From), Command: "PRIVMSG", Params: []string{target, e.Text}}
+	tags := map[string]string{}
+	if c.caps[capServerTime] {
+		tags["time"] = e.At.Format(serverTimeFormat)
+	}
+	if c.caps[capMessageTags] {
+		tags["msgid"] = e.ID
+	}
+	if batch != "" {
+		tags["batch"] = batch
+	}
+	if len(tags) > 0 {
+		m.Tags = tags
+	}
+	return m, true
+}
+
+// deliver queues e for c. The caller holds s.mu.
+func (s *Server) deliver(c *client, e histEntry, batch string) {
+	if m, ok := s.histMessage(c, e, batch); ok {
+		c.queue(m)
 	}
 }
 
@@ -104,18 +136,14 @@ func (s *Server) nickChanges(changes []nickChange) {
 	}
 }
 
-// sendReplay hands c the messages kept while no client was attached.
-func (s *Server) sendReplay(c *client) {
-	for _, e := range s.replay.take() {
-		m := e.Msg
-		m.Params = append([]string(nil), m.Params...)
-		if e.DM {
-			m.Params[0] = s.selfNick()
-		}
-		if c.serverTime {
-			m.Tags = map[string]string{"time": e.At.UTC().Format(serverTimeFormat)}
-		}
-		c.queue(m)
+// sendHistory replays the history to c, oldest first, unless c fetches it
+// with CHATHISTORY. The caller holds s.mu.
+func (s *Server) sendHistory(c *client) {
+	if c.caps[capChathistory] {
+		return
+	}
+	for _, e := range lastN(s.history.all(), replayMax) {
+		s.deliver(c, e, "")
 	}
 }
 

@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
+
 	"meshtastik/internal/daemon"
 	"meshtastik/internal/device"
 	"meshtastik/internal/fakedevice"
@@ -271,5 +273,43 @@ func TestFirstConnectFailureExits(t *testing.T) {
 		}
 	case <-time.After(20 * time.Second):
 		t.Fatal("run hung after failing to connect")
+	}
+}
+
+func TestHistoryFlag(t *testing.T) {
+	for _, tc := range []struct {
+		flag   string
+		replay bool
+	}{{"5", true}, {"0", false}} {
+		t.Run(tc.flag, func(t *testing.T) {
+			e := newEnv(t)
+			a := e.start("--listen", "127.0.0.1:0", "--host", "fake", "--history", tc.flag)
+			e.d.Inject(&pb.MeshPacket{From: 0x1234, To: device.Broadcast, Id: device.NewPacketID(),
+				PayloadVariant: &pb.MeshPacket_Decoded{Decoded: &pb.Data{Portnum: pb.PortNum_TEXT_MESSAGE_APP, Payload: []byte("kept?")}}})
+			time.Sleep(200 * time.Millisecond)
+			conn := dialIRC(t, a)
+			fmt.Fprint(conn, "NICK foo\r\nUSER u 0 * :r\r\n")
+			r := bufio.NewReader(conn)
+			conn.SetReadDeadline(time.Now().Add(time.Second))
+			got := false
+			for {
+				l, err := r.ReadString('\n')
+				if err != nil {
+					break
+				}
+				got = got || strings.Contains(l, "PRIVMSG #LongFast") && strings.HasSuffix(strings.TrimSpace(l), "kept?")
+			}
+			if got != tc.replay {
+				t.Fatalf("replayed: %v, want %v", got, tc.replay)
+			}
+		})
+	}
+}
+
+func TestHistoryFlagNotNegative(t *testing.T) {
+	e := newEnv(t)
+	err := run(context.Background(), []string{"--host", "fake", "--history", "-1"}, e.deps)
+	if err == nil || !strings.Contains(err.Error(), "--history") {
+		t.Fatal(err)
 	}
 }

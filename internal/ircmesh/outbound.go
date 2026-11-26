@@ -100,12 +100,16 @@ func (s *Server) cmdPrivmsg(c *client, m irc.Message) {
 		c.queue(s.notice(me, "too many messages waiting for the radio; message not sent"))
 		return
 	}
-	for _, other := range s.registered() {
-		if other == c {
-			continue
-		}
-		for _, p := range parts {
-			other.queue(irc.Message{Prefix: s.dir.mask(s.self), Command: "PRIVMSG", Params: []string{job.target, p}})
+	key := histKey{Channel: job.channel}
+	if job.to != device.Broadcast {
+		key = histKey{Channel: -1, Peer: job.to}
+	}
+	for _, p := range parts {
+		e := s.history.add(key, s.self, p, s.cfg.Now())
+		for _, other := range s.registered() {
+			if other != c {
+				s.deliver(other, e, "")
+			}
 		}
 	}
 }

@@ -96,7 +96,8 @@ Run `ircmesh --device <name>` (or `--host`/`--port`/`--ble`) and repeat with eac
 - [ ] `/msg <nick> hi` arrives as a direct message. A DM to a node that is off gives a "not delivered" notice within about 30 s.
 - [ ] `/me waves` arrives as `* <nick> waves`. A reaction and a reply from the app show up quoted.
 - [ ] A message of about 450 characters arrives as 3 messages. One of about 700 is refused with a notice.
-- [ ] With the client disconnected, messages sent to the node are replayed on reconnect (with timestamps in WeeChat/HexChat).
+- [ ] Messages from before the client connected, including ones you sent from IRC, are replayed on connect (with their original timestamps in WeeChat/HexChat), and again on every later connect.
+- [ ] Optional, with a `draft/chathistory` client (gamja, Goguma, senpai): nothing is replayed on connect, the client loads recent history itself, and scrolling back loads older messages.
 - [ ] Two clients at once: what one sends shows up in the other.
 - [ ] `meshtastik send "from cli"` shows up in IRC from your nick.
 - [ ] Rebooting the node gives "mesh link down" and then "mesh link back up" notices; messages sent in between are refused, not sent late.

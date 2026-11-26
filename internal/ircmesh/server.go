@@ -8,6 +8,7 @@ import (
 	"net"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -46,6 +47,9 @@ type Config struct {
 	// OnReady, when set, is called once the node is connected and clients
 	// are about to be accepted.
 	OnReady func()
+	// History is how many messages are kept per channel and per DM peer
+	// for clients that connect later (default 100; negative: none).
+	History int
 }
 
 func (c *Config) defaults() {
@@ -63,6 +67,9 @@ func (c *Config) defaults() {
 	}
 	if c.DMTimeout == 0 {
 		c.DMTimeout = 30 * time.Second
+	}
+	if c.History == 0 {
+		c.History = historyPerKey
 	}
 }
 
@@ -82,7 +89,8 @@ type Server struct {
 	lora      *pb.Config_LoRaConfig
 	names     map[int]string       // channel index → #name
 	dbHeard   map[uint32]time.Time // last_heard from the node DB
-	replay    *replay
+	history   *history
+	batches   uint64 // batch references handed out
 	recent    *recent
 	clients   map[*client]struct{}
 	statePath string
@@ -97,8 +105,10 @@ type Server struct {
 // New returns a server for cfg.
 func New(cfg Config) *Server {
 	cfg.defaults()
-	return &Server{cfg: cfg, names: map[int]string{}, dbHeard: map[uint32]time.Time{}, refreshC: make(chan struct{}, 1), replay: newReplay(replayPerKey),
-		recent: newRecent(1000), clients: map[*client]struct{}{}}
+	// msgids differ from those of an earlier run, which clients may hold
+	prefix := strconv.FormatInt(time.Now().UnixMilli(), 36) + "-"
+	return &Server{cfg: cfg, names: map[int]string{}, dbHeard: map[uint32]time.Time{}, refreshC: make(chan struct{}, 1),
+		history: newHistory(cfg.History, prefix), recent: newRecent(1000), clients: map[*client]struct{}{}}
 }
 
 func (s *Server) logf(format string, args ...any) {

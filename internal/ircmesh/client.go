@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,8 +36,8 @@ type client struct {
 	gotUser     bool
 	capPending  bool // CAP LS or REQ seen, END not yet
 	registered  bool
-	serverTime  bool
-	parted      map[int]bool // channel indexes this client has left
+	caps        map[string]bool // capabilities enabled
+	parted      map[int]bool    // channel indexes this client has left
 	overflowing bool
 }
 
@@ -86,7 +87,8 @@ func (c *client) hangUp(reason string) {
 
 // serveClient runs one IRC connection until it closes or ctx ends.
 func (s *Server) serveClient(ctx context.Context, conn net.Conn) {
-	c := &client{s: s, conn: conn, out: make(chan string, sendQueue), done: make(chan struct{}), parted: map[int]bool{}}
+	c := &client{s: s, conn: conn, out: make(chan string, sendQueue), done: make(chan struct{}),
+		parted: map[int]bool{}, caps: map[string]bool{}}
 	c.heard.Store(time.Now().UnixNano())
 	s.mu.Lock()
 	s.clients[c] = struct{}{}
@@ -229,7 +231,17 @@ func (s *Server) handle(c *client, m irc.Message) {
 // commands are the handlers for registered clients, by command.
 var commands = map[string]func(s *Server, c *client, m irc.Message){}
 
-// handleCap negotiates capabilities; only server-time is offered.
+// Capabilities the server offers.
+const (
+	capBatch       = "batch"
+	capChathistory = "draft/chathistory"
+	capMessageTags = "message-tags"
+	capServerTime  = "server-time"
+)
+
+var offeredCaps = []string{capBatch, capChathistory, capMessageTags, capServerTime}
+
+// handleCap negotiates capabilities.
 func (s *Server) handleCap(c *client, m irc.Message) {
 	sub := ""
 	if len(m.Params) > 0 {
@@ -243,13 +255,15 @@ func (s *Server) handleCap(c *client, m irc.Message) {
 		if !c.registered {
 			c.capPending = true
 		}
-		reply("LS", "server-time")
+		reply("LS", strings.Join(offeredCaps, " "))
 	case "LIST":
-		if c.serverTime {
-			reply("LIST", "server-time")
-		} else {
-			reply("LIST", "")
+		var on []string
+		for _, cp := range offeredCaps {
+			if c.caps[cp] {
+				on = append(on, cp)
+			}
 		}
+		reply("LIST", strings.Join(on, " "))
 	case "REQ":
 		if !c.registered {
 			c.capPending = true
@@ -258,22 +272,22 @@ func (s *Server) handleCap(c *client, m irc.Message) {
 		if len(m.Params) > 1 {
 			req = m.Params[1]
 		}
-		on, ok := c.serverTime, true
+		want := map[string]bool{}
 		for _, cp := range strings.Fields(req) {
-			switch cp {
-			case "server-time":
-				on = true
-			case "-server-time":
-				on = false
-			default:
-				ok = false
+			name, off := strings.CutPrefix(cp, "-")
+			if !slices.Contains(offeredCaps, name) {
+				want = nil
+				break
 			}
+			want[name] = !off
 		}
-		if !ok || req == "" {
+		if len(want) == 0 {
 			reply("NAK", req)
 			return
 		}
-		c.serverTime = on
+		for cp, on := range want {
+			c.caps[cp] = on
+		}
 		reply("ACK", req)
 	case "END":
 		c.capPending = false
@@ -308,7 +322,8 @@ func (s *Server) welcome(c *client) {
 	n("003", "This server was created "+s.started.Format(time.RFC1123))
 	n("004", serverName, s.cfg.Version, "i", "nt")
 	n("005", "CHANTYPES=#", fmt.Sprintf("NICKLEN=%d", nickLen), "CHANNELLEN=32", "CASEMAPPING=ascii",
-		"NETWORK=mesh", "are supported by this server")
+		"NETWORK=mesh", fmt.Sprintf("CHATHISTORY=%d", chathistoryMax), "MSGREFTYPES=msgid,timestamp",
+		"are supported by this server")
 	n("375", "- "+serverName+" Message of the day -")
 	n("372", fmt.Sprintf("- node %s (!%08x)", s.dir.realname(s.self), s.self))
 	if s.firmware != "" {
@@ -321,7 +336,7 @@ func (s *Server) welcome(c *client) {
 	for _, i := range s.indexes() {
 		s.joinBurst(c, i)
 	}
-	s.sendReplay(c)
+	s.sendHistory(c)
 }
 
 // joinBurst joins c to channel index i: JOIN, topic and names.

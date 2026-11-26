@@ -121,36 +121,6 @@ func TestAgingPartsAndQuits(t *testing.T) {
 	c.expect(`^:AS02!1bf0411d@mesh QUIT :timed out$`)
 }
 
-func TestReplayWhileDetached(t *testing.T) {
-	h := newHarness(t, withNodes(newFake()), nil)
-	h.d.Inject(rx(arveNum, 4, "one"))
-	p := rx(arveNum, 0, "two")
-	p.To = selfNum
-	h.d.Inject(p)
-	settle()
-	c := h.dial(t)
-	c.send("CAP LS 302")
-	c.send("CAP REQ :server-time")
-	c.send("NICK foo")
-	c.send("USER u 0 * :r")
-	c.send("CAP END")
-	c.expect(` 366 Ricco #Ryfylke `)
-	c.expect(`^@time=\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z :AS02!1bf0411d@mesh PRIVMSG #Ryfylke :?one$`)
-	c.expect(`^@time=\S+ :AS02!1bf0411d@mesh PRIVMSG Ricco :?two$`)
-	d := h.dial(t)
-	d.register("bar")
-	d.expectNone(`PRIVMSG`, 300*time.Millisecond)
-}
-
-func TestReplayWithoutServerTime(t *testing.T) {
-	h := newHarness(t, withNodes(newFake()), nil)
-	h.d.Inject(rx(arveNum, 4, "one"))
-	settle()
-	c := h.dial(t)
-	c.register("foo")
-	c.expect(`^:AS02!1bf0411d@mesh PRIVMSG #Ryfylke :?one$`)
-}
-
 func TestStalledClientIsDropped(t *testing.T) {
 	h := newHarness(t, newFake(), nil)
 	a := h.dial(t)

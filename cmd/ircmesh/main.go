@@ -96,6 +96,7 @@ func run(ctx context.Context, args []string, d deps) error {
 	tlsKey := fs.String("tls-key", "", "private key for --tls-cert (PEM)")
 	passFile := fs.String("password-file", "", "file holding the password clients must send (also MESHTASTIK_IRC_PASSWORD)")
 	active := fs.Duration("active", 24*time.Hour, "how long a node stays in a channel without being heard there")
+	history := fs.Int("history", 100, "messages kept per channel and per person for clients that connect later (0 = none)")
 	var sel nodeconn.Selection
 	fs.StringVar(&sel.Device, "device", "", "named device to serve (see meshtastik device list)")
 	fs.StringVar(&sel.Flags.Port, "port", "", "serial port of the node")
@@ -120,6 +121,12 @@ func run(ctx context.Context, args []string, d deps) error {
 	}
 	if n > 1 {
 		return errors.New("only one of --device, --port, --host and --ble may be given")
+	}
+	if *history < 0 {
+		return errors.New("--history can't be negative")
+	}
+	if *history == 0 {
+		*history = -1 // ircmesh.Config's zero value is the default
 	}
 	if (*tlsCert == "") != (*tlsKey == "") {
 		return errors.New("--tls-cert and --tls-key go together")
@@ -190,7 +197,7 @@ func run(ctx context.Context, args []string, d deps) error {
 	}
 	fmt.Fprintf(d.Stderr, "ircmesh %s: connecting to %s\n", version, node)
 	srv := ircmesh.New(ircmesh.Config{Version: version, Open: open, Password: password, Active: *active,
-		StateDir: d.StateDir, Log: d.Stderr, OnReady: func() {
+		History: *history, StateDir: d.StateDir, Log: d.Stderr, OnReady: func() {
 			fmt.Fprintf(d.Stderr, "connected to the node; IRC clients can connect to %s\n", ln.Addr())
 			if d.Ready != nil {
 				d.Ready(ln.Addr())

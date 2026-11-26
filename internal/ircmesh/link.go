@@ -221,7 +221,7 @@ func (s *Server) syncState(st *device.State) {
 		}
 		if _, still := s.names[i]; !still {
 			s.members.dropChannel(i)
-			s.replay.dropChannel(i)
+			s.history.dropChannel(i)
 			s.dirty = true
 			for _, c := range s.registered() {
 				delete(c.parted, i)
