@@ -25,6 +25,18 @@ var ErrImplicitAck = errors.New("relayed by the mesh (implicit ack) but not conf
 // Broadcast) asks for an ack; with waitAck SendText waits for the mesh's
 // routing reply, returning ErrNoAck when ctx's deadline passes first.
 func (c *Client) SendText(ctx context.Context, text string, to uint32, channel uint32, waitAck bool) error {
+	return c.SendTextID(ctx, randomID(), text, to, channel, waitAck)
+}
+
+// NewPacketID returns a random, non-zero packet id for SendTextID.
+func NewPacketID() uint32 { return randomID() }
+
+// SendTextID is SendText with the packet id chosen by the caller, so it can
+// recognise replies and reactions to the message.
+func (c *Client) SendTextID(ctx context.Context, id uint32, text string, to uint32, channel uint32, waitAck bool) error {
+	if id == 0 {
+		return errors.New("0 is not a valid packet id")
+	}
 	if n := len([]byte(text)); n > int(pb.Constants_DATA_PAYLOAD_LEN) {
 		return fmt.Errorf("text is %d bytes; the limit is %d", n, int(pb.Constants_DATA_PAYLOAD_LEN))
 	}
@@ -35,7 +47,6 @@ func (c *Client) SendText(ctx context.Context, text string, to uint32, channel u
 	if to == me {
 		return errors.New("cannot send a message to the connected node itself")
 	}
-	id := randomID()
 	direct := to != Broadcast
 	var responses chan *pb.MeshPacket
 	if waitAck && direct {

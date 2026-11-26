@@ -142,3 +142,20 @@ func TestSendTextBroadcastCarriesHopLimit(t *testing.T) {
 		t.Fatalf("broadcast hop limit %d: firmware only fills it in for want_ack packets", p.GetHopLimit())
 	}
 }
+
+func TestSendTextIDUsesTheGivenID(t *testing.T) {
+	d := fakedevice.New()
+	c := openFake(t, d)
+	if err := c.SendTextID(context.Background(), 0xabc, "hi", Broadcast, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	if p := d.Texts()[0]; p.Id != 0xabc {
+		t.Errorf("packet %v", p)
+	}
+	if err := c.SendTextID(context.Background(), 0, "hi", Broadcast, 0, false); err == nil || !strings.Contains(err.Error(), "0 is not a valid packet id") {
+		t.Errorf("id 0: %v", err)
+	}
+	if NewPacketID() == 0 {
+		t.Error("NewPacketID returned 0")
+	}
+}
