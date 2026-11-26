@@ -43,8 +43,33 @@ func splitText(s string, max, parts int) ([]string, error) {
 	return out, nil
 }
 
+// dropControls removes control characters (C0 and DEL), which could break
+// or disguise IRC lines.
+func dropControls(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// meshLines is a text payload as valid UTF-8 lines without control
+// characters: \x01 would make it CTCP, CR and NUL could break IRC lines.
+// Blank lines are dropped.
+func meshLines(payload []byte) []string {
+	var out []string
+	for l := range strings.SplitSeq(strings.ToValidUTF8(string(payload), "\uFFFD"), "\n") {
+		if l = dropControls(l); strings.TrimSpace(l) != "" {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
 // quote is the start of a message for a reaction or reply.
 func quote(s string) string {
+	s = dropControls(s)
 	r := []rune(s)
 	if len(r) <= quoteRunes {
 		return s
@@ -84,13 +109,7 @@ func (r *recent) get(id uint32) (string, bool) {
 // renderText turns a text packet into IRC message bodies, one per line of
 // text; action means they are CTCP ACTIONs (a reaction).
 func renderText(d *pb.Data, r *recent) (lines []string, action bool) {
-	text := strings.ToValidUTF8(string(d.GetPayload()), "�")
-	text = strings.NewReplacer("\r", "", "\x00", "").Replace(text)
-	for l := range strings.SplitSeq(text, "\n") {
-		if strings.TrimSpace(l) != "" {
-			lines = append(lines, l)
-		}
-	}
+	lines = meshLines(d.GetPayload())
 	reply := d.GetReplyId()
 	if reply == 0 {
 		return lines, false

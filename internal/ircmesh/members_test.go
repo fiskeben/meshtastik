@@ -34,7 +34,6 @@ func TestCountsOnlyDecodedBroadcasts(t *testing.T) {
 		"encrypted": encrypted,
 		"pki":       pki,
 		"to self":   pkt(7, selfNum, 0, true),
-		"not rx":    pkt(7, device.Broadcast, 0, false),
 		"from self": pkt(selfNum, device.Broadcast, 0, true),
 		"index 8+":  pkt(7, device.Broadcast, 8, true),
 	}
@@ -42,6 +41,12 @@ func TestCountsOnlyDecodedBroadcasts(t *testing.T) {
 		if _, ok := counts(p, selfNum); ok {
 			t.Errorf("%s counted", name)
 		}
+	}
+}
+
+func TestCountsWithoutRxTime(t *testing.T) {
+	if ch, ok := counts(pkt(7, device.Broadcast, 2, false), selfNum); !ok || ch != 2 {
+		t.Fatal("a node without a clock never counts", ch, ok)
 	}
 }
 

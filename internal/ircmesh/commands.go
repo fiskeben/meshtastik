@@ -133,7 +133,7 @@ func (s *Server) cmdTopic(c *client, m irc.Message) {
 // whoLine is a 352 reply for node num seen in channel ch ("*" for none).
 func (s *Server) whoLine(c *client, ch string, num uint32) irc.Message {
 	return s.numeric(c, "352", ch, fmt.Sprintf("%08x", num), "mesh", serverName, s.dir.nick(num), "H",
-		"0 "+s.dir.user(num).GetLongName())
+		"0 "+s.dir.realname(num))
 }
 
 func (s *Server) cmdWho(c *client, m irc.Message) {
@@ -174,7 +174,7 @@ func (s *Server) cmdWhois(c *client, m irc.Message) {
 		return
 	}
 	nick = s.dir.nick(num)
-	c.queue(s.numeric(c, "311", nick, fmt.Sprintf("%08x", num), "mesh", "*", s.dir.user(num).GetLongName()))
+	c.queue(s.numeric(c, "311", nick, fmt.Sprintf("%08x", num), "mesh", "*", s.dir.realname(num)))
 	var chans []string
 	if num == s.self {
 		c.queue(s.numeric(c, "312", nick, serverName, "this node"))

@@ -64,7 +64,25 @@ func Parse(line string) (Message, error) {
 	return m, nil
 }
 
-// String formats m as a line without CRLF.
+// lineBreaks are what may never appear inside a line.
+var lineBreaks = strings.NewReplacer("\r", " ", "\n", " ", "\x00", "")
+
+// middle makes p safe as a parameter other than the last: no line breaks,
+// no spaces, not empty and not starting with ':'.
+func middle(p string) string {
+	p = strings.ReplaceAll(lineBreaks.Replace(p), " ", "_")
+	if p == "" {
+		return "*"
+	}
+	if p[0] == ':' {
+		p = "_" + p[1:]
+	}
+	return p
+}
+
+// String formats m as a line without CRLF. Whatever the fields hold, the
+// result is one line with the same number of parameters: line breaks
+// become spaces, and spaces in middle parameters become _.
 func (m Message) String() string {
 	var b strings.Builder
 	if len(m.Tags) > 0 {
@@ -88,13 +106,18 @@ func (m Message) String() string {
 	}
 	if m.Prefix != "" {
 		b.WriteByte(':')
-		b.WriteString(m.Prefix)
+		b.WriteString(middle(m.Prefix))
 		b.WriteByte(' ')
 	}
-	b.WriteString(m.Command)
+	b.WriteString(middle(m.Command))
 	for i, p := range m.Params {
 		b.WriteByte(' ')
-		if i == len(m.Params)-1 && (p == "" || strings.Contains(p, " ") || p[0] == ':') {
+		if i < len(m.Params)-1 {
+			b.WriteString(middle(p))
+			continue
+		}
+		p = lineBreaks.Replace(p)
+		if p == "" || strings.Contains(p, " ") || p[0] == ':' {
 			b.WriteByte(':')
 		}
 		b.WriteString(p)

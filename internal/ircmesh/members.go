@@ -17,12 +17,12 @@ import (
 )
 
 // counts reports the channel a packet shows its sender on. Only packets the
-// node decoded with a channel key and received over the radio say that:
+// node decoded with a channel key say that (rx_time is not required: a
+// node without a clock leaves it 0):
 // undecoded packets carry a channel hash, PKI and other direct messages say
 // nothing about the channels a node listens on.
 func counts(p *pb.MeshPacket, self uint32) (ch int, ok bool) {
-	if p.GetDecoded() == nil || p.GetPkiEncrypted() || p.GetRxTime() == 0 ||
-		p.GetFrom() == self || p.GetTo() != device.Broadcast || p.GetChannel() >= 8 {
+	if p.GetDecoded() == nil || p.GetPkiEncrypted() || p.GetFrom() == self || p.GetTo() != device.Broadcast || p.GetChannel() >= 8 {
 		return 0, false
 	}
 	return int(p.GetChannel()), true
@@ -126,6 +126,14 @@ func (m *membership) seed(nodes map[uint32]*pb.NodeInfo, self uint32, now time.T
 		if at := time.Unix(int64(n.GetLastHeard()), 0); now.Sub(at) <= m.active {
 			m.heard(num, int(n.GetChannel()), at)
 		}
+	}
+}
+
+// shift moves every membership's time forward by d, so time the server
+// couldn't hear doesn't count against anyone.
+func (m *membership) shift(d time.Duration) {
+	for k, at := range m.heardAt {
+		m.heardAt[k] = at.Add(d)
 	}
 }
 

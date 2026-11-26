@@ -2,6 +2,7 @@ package ircmesh
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
@@ -26,8 +27,7 @@ func (s *Server) packet(p *pb.MeshPacket) {
 		}
 	}
 	if ch, ok := counts(p, s.self); ok {
-		if _, known := s.names[ch]; known && s.members.heard(from, ch, s.cfg.Now()) {
-			s.dirty = true
+		if _, known := s.names[ch]; known && s.heard(from, ch) {
 			s.toChannel(ch, irc.Message{Prefix: s.dir.mask(from), Command: "JOIN", Params: []string{s.names[ch]}})
 		}
 	}
@@ -59,7 +59,7 @@ func (s *Server) text(p *pb.MeshPacket) {
 		return
 	}
 	lines, action := renderText(p.GetDecoded(), s.recent)
-	s.recent.add(p.GetId(), string(p.GetDecoded().GetPayload()))
+	s.recent.add(p.GetId(), strings.Join(meshLines(p.GetDecoded().GetPayload()), " "))
 	clients := s.registered()
 	for _, l := range lines {
 		if action {
@@ -127,11 +127,22 @@ func (s *Server) activeText() string {
 	return s.cfg.Active.String()
 }
 
+// heard records hearing num on ch now and reports whether it joined ch.
+// Renewed times are saved too, so a restart doesn't age out active nodes.
+// The caller holds s.mu.
+func (s *Server) heard(num uint32, ch int) bool {
+	s.dirty = true
+	return s.members.heard(num, ch, s.cfg.Now())
+}
+
 // age ends the memberships not renewed within the active window, and saves
 // the memberships when they changed.
 func (s *Server) age() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.up {
+		return // nobody leaves because the server can't hear them
+	}
 	quit := map[uint32]bool{}
 	for _, ch := range s.members.expire(s.cfg.Now()) {
 		s.dirty = true

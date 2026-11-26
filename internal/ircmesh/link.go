@@ -64,7 +64,7 @@ func (s *Server) linkDown(cause error) {
 	if !s.up {
 		return
 	}
-	s.up = false
+	s.up, s.downSince = false, s.cfg.Now()
 	s.toAll(s.notice(s.selfNick(), fmt.Sprintf("mesh link down (%v); reconnecting", cause)))
 }
 
@@ -74,6 +74,8 @@ func (s *Server) linkUp() {
 		return
 	}
 	s.up = true
+	s.members.shift(s.cfg.Now().Sub(s.downSince))
+	s.dirty = true
 	s.toAll(s.notice(s.selfNick(), "mesh link back up"))
 }
 

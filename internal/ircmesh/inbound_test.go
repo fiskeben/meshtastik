@@ -205,3 +205,89 @@ func TestMembershipPersists(t *testing.T) {
 	c2.send("NAMES #LongFast")
 	c2.expect(` 353 Ricco = #LongFast :Ricco AS02$`)
 }
+
+func TestReplyQuoteCannotInjectLines(t *testing.T) {
+	h := newHarness(t, withNodes(newFake()), nil)
+	c := h.dial(t)
+	c.register("foo")
+	orig := rx(arveNum, 4, "hi\r\nNOTICE Ricco :injected")
+	h.d.Inject(orig)
+	reply := rx(arveNum, 4, "ok")
+	reply.GetDecoded().ReplyId = orig.Id
+	h.d.Inject(reply)
+	react := rx(arveNum, 4, "👍")
+	react.GetDecoded().Emoji, react.GetDecoded().ReplyId = 1, orig.Id
+	h.d.Inject(react)
+	c.expect(`PRIVMSG #Ryfylke :↪ "hi NOTICE Ricco :injected" ok$`)
+	c.expect(`reacted 👍 to "hi NOTICE Ricco :injected"`)
+	for _, l := range c.seen {
+		if strings.HasPrefix(l, "NOTICE") {
+			t.Fatalf("injected line %q", l)
+		}
+	}
+}
+
+func TestMeshCTCPIsDefused(t *testing.T) {
+	h := newHarness(t, withNodes(newFake()), nil)
+	c := h.dial(t)
+	c.register("foo")
+	h.d.Inject(rx(arveNum, 4, "\x01DCC SEND evil 1 2 3\x01"))
+	c.expect("PRIVMSG #Ryfylke :DCC SEND evil 1 2 3$")
+}
+
+func TestTextWithoutRxTimeStillJoins(t *testing.T) {
+	h := newHarness(t, withNodes(newFake()), nil)
+	c := h.dial(t)
+	c.register("foo")
+	p := rx(arveNum, 0, "no clock")
+	p.RxTime = nil
+	h.d.Inject(p)
+	c.expect(`^:AS02!1bf0411d@mesh JOIN :?#LongFast$`)
+	c.expect(`PRIVMSG #LongFast :no clock$`)
+}
+
+func TestRenewedMembershipIsSaved(t *testing.T) {
+	d := withNodes(newFake())
+	dir := t.TempDir()
+	clk := &clock{}
+	cfg := testConfig(d, dir)
+	cfg.Now = clk.now
+	run := func(text string) {
+		h := startHarness(t, d, cfg)
+		c := h.dial(t)
+		c.register("foo")
+		d.Inject(rx(arveNum, 0, text))
+		c.expect(`PRIVMSG #LongFast :?` + text + `$`)
+		h.close()
+	}
+	run("first") // joins #LongFast; saved
+	clk.advance(20 * time.Hour)
+	run("again")                // renews the membership only
+	clk.advance(10 * time.Hour) // 30 h after the first, 10 h after the last
+	h := startHarness(t, d, cfg)
+	h.srv.age()
+	c := h.dial(t)
+	c.register("foo")
+	c.send("NAMES #LongFast")
+	c.expect(` 353 Ricco = #LongFast :Ricco AS02$`)
+}
+
+func TestMembersSurviveOutage(t *testing.T) {
+	clk := &clock{}
+	h := newHarness(t, withNodes(newFake()), func(c *Config) { c.Now = clk.now })
+	c := h.dial(t)
+	c.register("foo")
+	h.d.Inject(rx(arveNum, 0, "hi"))
+	c.expect(`PRIVMSG #LongFast :?hi$`)
+	h.d.Update(func() { h.d.RefuseDials = true })
+	h.d.DropLink()
+	c.expect(`mesh link down`)
+	clk.advance(30 * time.Hour)
+	h.srv.age()
+	h.d.Update(func() { h.d.RefuseDials = false })
+	c.expect(`mesh link back up`)
+	h.srv.age()
+	c.expectNone(` (QUIT|PART) `, 200*time.Millisecond)
+	c.send("NAMES #LongFast")
+	c.expect(` 353 Ricco = #LongFast :Ricco AS02$`)
+}

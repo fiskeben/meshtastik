@@ -310,7 +310,7 @@ func (s *Server) welcome(c *client) {
 	n("005", "CHANTYPES=#", fmt.Sprintf("NICKLEN=%d", nickLen), "CHANNELLEN=32", "CASEMAPPING=ascii",
 		"NETWORK=mesh", "are supported by this server")
 	n("375", "- "+serverName+" Message of the day -")
-	n("372", fmt.Sprintf("- node %s (!%08x)", s.dir.user(s.self).GetLongName(), s.self))
+	n("372", fmt.Sprintf("- node %s (!%08x)", s.dir.realname(s.self), s.self))
 	if s.firmware != "" {
 		n("372", "- firmware "+s.firmware)
 	}

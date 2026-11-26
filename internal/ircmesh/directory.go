@@ -106,6 +106,12 @@ func (d *directory) user(num uint32) *pb.User {
 	return nil
 }
 
+// realname is the node's long name without control characters, for
+// realname fields.
+func (d *directory) realname(num uint32) string {
+	return dropControls(d.user(num).GetLongName())
+}
+
 // mask is the node's hostmask: nick!<node number in hex>@mesh.
 func (d *directory) mask(num uint32) string {
 	return fmt.Sprintf("%s!%08x@mesh", d.nick(num), num)

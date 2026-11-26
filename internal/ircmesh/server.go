@@ -89,6 +89,7 @@ type Server struct {
 	dirty     bool          // memberships changed since last saved
 	sendQ     chan sendJob  // to the current sender; nil while the link is down
 	up        bool          // the node connection is working
+	downSince time.Time     // when it stopped, while !up
 	refreshC  chan struct{} // asks the refresher to re-read the node's state
 	wg        sync.WaitGroup
 }

@@ -2,6 +2,7 @@ package irc
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -86,5 +87,17 @@ func TestToUTF8Latin1(t *testing.T) {
 func TestFold(t *testing.T) {
 	if got := Fold("Ab[]Ø"); got != "ab[]Ø" {
 		t.Errorf("got %q", got)
+	}
+}
+
+func TestStringNeverBreaksLines(t *testing.T) {
+	m := Message{Prefix: "a\r\nb", Command: "PRIVMSG", Params: []string{"x y", ":z", "", "end\r\nNOTICE x :evil\x00"}}
+	s := m.String()
+	if strings.ContainsAny(s, "\r\n\x00") {
+		t.Fatalf("%q", s)
+	}
+	got, err := Parse(s)
+	if err != nil || len(got.Params) != 4 || got.Command != "PRIVMSG" {
+		t.Fatalf("%q parses as %#v, %v", s, got, err)
 	}
 }

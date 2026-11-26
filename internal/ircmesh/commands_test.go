@@ -2,8 +2,11 @@ package ircmesh
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
 )
 
 func TestJoinUnknownChannel(t *testing.T) {
@@ -139,4 +142,23 @@ func TestUserhostIsonAway(t *testing.T) {
 	c.expect(` 306 Ricco `)
 	c.send("AWAY")
 	c.expect(` 305 Ricco `)
+}
+
+func TestLongNameCannotInjectLines(t *testing.T) {
+	d := newFake()
+	d.ExtraNodes = []*pb.NodeInfo{{Num: arveNum, Channel: 4, LastHeard: uint32(time.Now().Unix()),
+		User: &pb.User{ShortName: "EVL", LongName: "x\r\n:evil!e@mesh PRIVMSG #Ryfylke :pwn"}}}
+	h := newHarness(t, d, nil)
+	c := h.dial(t)
+	c.register("foo")
+	c.send("WHO #Ryfylke")
+	c.expect(` 352 Ricco #Ryfylke 1bf0411d mesh ircmesh EVL H :0 x:evil!e@mesh PRIVMSG #Ryfylke :pwn$`)
+	c.send("WHOIS EVL")
+	c.expect(` 311 Ricco EVL `)
+	c.expect(` 318 `)
+	for _, l := range c.seen {
+		if strings.HasPrefix(l, ":evil") {
+			t.Fatalf("injected line %q", l)
+		}
+	}
 }
