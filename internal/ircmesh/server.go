@@ -83,15 +83,17 @@ type Server struct {
 	recent    *recent
 	clients   map[*client]struct{}
 	statePath string
-	dirty     bool         // memberships changed since last saved
-	sendQ     chan sendJob // to the current sender; nil while the link is down
+	dirty     bool          // memberships changed since last saved
+	sendQ     chan sendJob  // to the current sender; nil while the link is down
+	up        bool          // the node connection is working
+	refreshC  chan struct{} // asks the refresher to re-read the node's state
 	wg        sync.WaitGroup
 }
 
 // New returns a server for cfg.
 func New(cfg Config) *Server {
 	cfg.defaults()
-	return &Server{cfg: cfg, names: map[int]string{}, dbHeard: map[uint32]time.Time{}, replay: newReplay(replayPerKey),
+	return &Server{cfg: cfg, names: map[int]string{}, dbHeard: map[uint32]time.Time{}, refreshC: make(chan struct{}, 1), replay: newReplay(replayPerKey),
 		recent: newRecent(1000), clients: map[*client]struct{}{}}
 }
 
@@ -111,11 +113,20 @@ func (s *Server) Run(ctx context.Context, ln net.Listener) error {
 		ln.Close()
 		return err
 	}
+	st := m.State()
 	s.mu.Lock()
-	s.mesh = m
-	s.applyState(m.State())
+	s.mesh, s.up = m, true
+	s.applyState(st)
 	s.mu.Unlock()
-	s.startMesh(ctx, m)
+	s.wg.Add(2)
+	go func() {
+		defer s.wg.Done()
+		s.superviseMesh(ctx, m)
+	}()
+	go func() {
+		defer s.wg.Done()
+		s.ager(ctx)
+	}()
 
 	go func() {
 		<-ctx.Done()
@@ -144,8 +155,8 @@ func (s *Server) Run(ctx context.Context, ln net.Listener) error {
 }
 
 // applyState takes the node's identity, names, channels and the nodes it
-// knows from st. The caller holds s.mu.
-func (s *Server) applyState(st *device.State) {
+// knows from st, and returns the nicks that changed. The caller holds s.mu.
+func (s *Server) applyState(st *device.State) []nickChange {
 	first := s.dir == nil
 	if first {
 		s.self = st.MyInfo.GetMyNodeNum()
@@ -159,10 +170,10 @@ func (s *Server) applyState(st *device.State) {
 		}
 	}
 	s.firmware = st.Metadata.GetFirmwareVersion()
-	s.dir.set(s.self, st.Self().GetUser())
+	changes := s.dir.set(s.self, st.Self().GetUser())
 	for _, num := range slices.Sorted(maps.Keys(st.Nodes)) {
 		if num != s.self {
-			s.dir.set(num, st.Nodes[num].GetUser())
+			changes = append(changes, s.dir.set(num, st.Nodes[num].GetUser())...)
 		}
 		if lh := st.Nodes[num].GetLastHeard(); lh != 0 {
 			s.dbHeard[num] = time.Unix(int64(lh), 0)
@@ -173,6 +184,20 @@ func (s *Server) applyState(st *device.State) {
 	s.names = channelNames(s.chans, s.lora)
 	if first {
 		s.members.seed(st.Nodes, s.self, s.cfg.Now())
+	}
+	return changes
+}
+
+// shutdown saves the memberships and closes the node connection once every
+// client is gone.
+func (s *Server) shutdown() {
+	s.mu.Lock()
+	s.save()
+	m := s.mesh
+	s.mesh = nil
+	s.mu.Unlock()
+	if m != nil {
+		m.Close()
 	}
 }
 
