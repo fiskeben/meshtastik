@@ -157,36 +157,54 @@ func TestStalledClientIsDropped(t *testing.T) {
 	a.register("foo") // and never reads again
 	b := h.dial(t)
 	b.register("bar")
-	body := strings.Repeat("x", 190)
-	const n = 15000
-	done := make(chan struct{})
+
+	// b keeps reading throughout, as a healthy client does.
+	gotLast := make(chan struct{})
 	go func() {
-		defer close(done)
-		for i := range n {
-			text := body
-			if i == n-1 {
-				text = "the last one"
+		for {
+			l, ok := b.line(30 * time.Second)
+			if !ok {
+				return
 			}
-			h.d.Inject(rx(0x42, 0, text))
-			if i%10 == 0 {
-				time.Sleep(time.Millisecond) // as fast as a reader keeps up with
+			if strings.HasSuffix(l, ":the last one") {
+				close(gotLast)
+				return
 			}
 		}
 	}()
-	b.expect(`:the last one$`)
-	<-done
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+
+	clients := func() int {
 		h.srv.mu.Lock()
-		left := len(h.srv.clients)
-		h.srv.mu.Unlock()
-		if left == 1 {
+		defer h.srv.mu.Unlock()
+		return len(h.srv.clients)
+	}
+	// How much a client that stopped reading absorbs before the server's
+	// writes block depends on the OS's socket buffers: under 2 MB on macOS
+	// loopback, over 4 MB on Linux. So send until a is dropped rather than
+	// a fixed amount, up to far more than any OS buffers.
+	body := strings.Repeat("x", 190)
+	const maxLines = 100_000 // ~23 MB
+	for i := 0; ; i++ {
+		if i%100 == 0 && clients() == 1 {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%d clients left", left)
+		if i == maxLines {
+			t.Fatalf("stalled client still connected after %d lines", i)
 		}
-		time.Sleep(20 * time.Millisecond)
+		h.d.Inject(rx(0x42, 0, body))
+		if i%10 == 0 {
+			time.Sleep(time.Millisecond) // as fast as a reader keeps up with
+		}
+	}
+
+	h.d.Inject(rx(0x42, 0, "the last one"))
+	select {
+	case <-gotLast:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the reading client missed the last line, or was dropped instead")
+	}
+	if !a.closed() {
+		t.Error("the stalled client's connection is still open")
 	}
 }
 

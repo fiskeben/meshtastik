@@ -46,6 +46,9 @@ func TestInterruptCancelsTheCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
+	// Accept returns once the kernel completes the TCP handshake, which can be
+	// before the client's dial returns; wait for its first bytes so the
+	// interrupt lands in the node handshake, not in the dial.
 	accepted := make(chan struct{}, 1)
 	go func() {
 		for {
@@ -53,8 +56,12 @@ func TestInterruptCancelsTheCommand(t *testing.T) {
 			if err != nil {
 				return
 			}
-			accepted <- struct{}{}
-			go io.Copy(io.Discard, c)
+			go func() {
+				if _, err := c.Read(make([]byte, 1)); err == nil {
+					accepted <- struct{}{}
+				}
+				io.Copy(io.Discard, c)
+			}()
 		}
 	}()
 	var stderr bytes.Buffer
