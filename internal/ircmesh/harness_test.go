@@ -7,6 +7,8 @@ import (
 	"net"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -50,6 +52,7 @@ type harness struct {
 	addr string
 	done chan error
 	stop context.CancelFunc
+	once sync.Once
 }
 
 func testConfig(d *fakedevice.Device, dir string) Config {
@@ -88,18 +91,46 @@ func startHarness(t *testing.T, d *fakedevice.Device, cfg Config) *harness {
 	h := &harness{t: t, d: d, srv: New(cfg), addr: ln.Addr().String(), done: make(chan error, 1), stop: cancel}
 	go func() { h.done <- h.srv.Run(ctx, ln) }()
 	t.Cleanup(h.close)
+	h.waitOpen()
 	return h
+}
+
+// waitOpen waits until the server has connected to the node and listens.
+func (h *harness) waitOpen() {
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		h.srv.mu.Lock()
+		up := h.srv.mesh != nil
+		h.srv.mu.Unlock()
+		if up {
+			settle()
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	h.t.Fatal("server never connected to the node")
 }
 
 // close stops the server and waits for Run to return.
 func (h *harness) close() {
-	h.stop()
-	select {
-	case <-h.done:
-	case <-time.After(5 * time.Second):
-		h.t.Error("server did not stop")
-	}
+	h.once.Do(func() {
+		h.stop()
+		select {
+		case <-h.done:
+		case <-time.After(5 * time.Second):
+			h.t.Error("server did not stop")
+		}
+	})
 }
+
+// clock is a controllable Config.Now: the real time plus an offset.
+type clock struct{ offset atomic.Int64 }
+
+func (c *clock) now() time.Time          { return time.Now().Add(time.Duration(c.offset.Load())) }
+func (c *clock) advance(d time.Duration) { c.offset.Add(int64(d)) }
+
+// settle waits for injected packets to be handled.
+func settle() { time.Sleep(100 * time.Millisecond) }
 
 type ircClient struct {
 	t    *testing.T

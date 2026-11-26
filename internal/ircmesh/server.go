@@ -83,6 +83,7 @@ type Server struct {
 	recent    *recent
 	clients   map[*client]struct{}
 	statePath string
+	dirty     bool // memberships changed since last saved
 	wg        sync.WaitGroup
 }
 

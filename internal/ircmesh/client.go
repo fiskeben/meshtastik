@@ -321,6 +321,7 @@ func (s *Server) welcome(c *client) {
 	for _, i := range s.indexes() {
 		s.joinBurst(c, i)
 	}
+	s.sendReplay(c)
 }
 
 // joinBurst joins c to channel index i: JOIN, topic and names.
