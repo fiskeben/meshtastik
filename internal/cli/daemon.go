@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"meshtastik/internal/daemon"
+	"meshtastik/internal/nodeconn"
 	"meshtastik/internal/transport"
 )
 
@@ -27,44 +28,22 @@ func (a *app) daemonSocket() string {
 	return daemon.SocketPath()
 }
 
-// flagsFor is the connection flag that selects t.
-func flagsFor(t daemon.Target) ConnFlags {
-	switch t.Kind {
-	case transport.KindTCP.String():
-		return ConnFlags{Host: t.Addr}
-	case transport.KindBLE.String():
-		return ConnFlags{BLE: t.Addr}
-	}
-	return ConnFlags{Port: t.Addr}
-}
-
 // daemonDialer connects through the daemon, starting it if none answers.
-// Serial auto-detection runs here, so the daemon gets an explicit target.
 func (a *app) daemonDialer(conn ConnFlags, backlog bool, timeout time.Duration) (transport.Dialer, error) {
-	kind, addr, err := chooseConn(conn, transport.DetectSerial)
-	if err != nil {
-		return nil, err
-	}
-	h := daemon.Hello{Version: version, Target: daemon.Target{Kind: kind.String(), Addr: addr},
-		Timeout: daemon.Duration(timeout), Backlog: backlog}
-	sock := a.DaemonSocket
-	return func(ctx context.Context) (transport.Conn, error) {
-		conn, r, err := daemon.Connect(ctx, sock, h)
-		if errors.Is(err, daemon.ErrNotRunning) && a.StartDaemon != nil {
-			if err := a.startDaemon(ctx, sock, "daemon", "run"); err != nil {
-				return nil, err
+	d := nodeconn.DaemonDial{
+		Socket:  a.DaemonSocket,
+		Version: version,
+		OnVersion: func(v string) {
+			if !a.versionNoted {
+				a.versionNoted = true
+				fmt.Fprintf(a.Stderr, "note: the daemon runs meshtastik %s, this is %s; run 'meshtastik daemon restart' to update it\n", v, version)
 			}
-			conn, r, err = daemon.Connect(ctx, sock, h)
-		}
-		if err != nil {
-			return nil, err
-		}
-		if r.Version != version && !a.versionNoted {
-			a.versionNoted = true
-			fmt.Fprintf(a.Stderr, "note: the daemon runs meshtastik %s, this is %s; run 'meshtastik daemon restart' to update it\n", r.Version, version)
-		}
-		return conn, nil
-	}, nil
+		},
+	}
+	if a.StartDaemon != nil {
+		d.Start = func(ctx context.Context, sock string) error { return a.startDaemon(ctx, sock, "daemon", "run") }
+	}
+	return d.Dialer(conn, backlog, timeout)
 }
 
 // startDaemon starts a daemon on sock with args and waits until it answers.
@@ -112,7 +91,7 @@ func newDaemonRunCmd(a *app) *cobra.Command {
 			}
 			srv := &daemon.Server{
 				Version:       version,
-				Dial:          func(t daemon.Target) (transport.Dialer, error) { return a.Dial(flagsFor(t)) },
+				Dial:          func(t daemon.Target) (transport.Dialer, error) { return a.Dial(nodeconn.FlagsFor(t)) },
 				IdleTimeout:   idle,
 				Log:           a.Stderr,
 				DeviceOptions: a.DeviceOptions,

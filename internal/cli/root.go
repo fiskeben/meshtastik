@@ -4,7 +4,6 @@ package cli
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +19,7 @@ import (
 	"meshtastik/internal/daemon"
 	"meshtastik/internal/device"
 	"meshtastik/internal/devices"
+	"meshtastik/internal/nodeconn"
 	"meshtastik/internal/transport"
 )
 
@@ -27,9 +27,7 @@ import (
 var version = "dev"
 
 // ConnFlags holds the mutually exclusive connection selectors.
-type ConnFlags struct {
-	Port, Host, BLE string
-}
+type ConnFlags = nodeconn.Flags
 
 // Deps carries the side-effecting dependencies of the commands.
 type Deps struct {
@@ -57,7 +55,7 @@ type Deps struct {
 // Commands go through the daemon unless MESHTASTIK_NO_DAEMON is set.
 func DefaultDeps() Deps {
 	d := Deps{
-		Dial:        defaultDial,
+		Dial:        nodeconn.Dial,
 		Stdout:      os.Stdout,
 		Stderr:      os.Stderr,
 		Confirm:     terminalConfirm,
@@ -69,72 +67,6 @@ func DefaultDeps() Deps {
 		d.DaemonSocket = daemon.SocketPath()
 	}
 	return d
-}
-
-// chooseConn picks the transport and its target from the flags. Without any
-// flag it auto-detects a single serial device.
-func chooseConn(f ConnFlags, detect func() ([]transport.SerialCandidate, error)) (transport.Kind, string, error) {
-	switch {
-	case f.Port != "":
-		return transport.KindSerial, f.Port, nil
-	case f.Host != "":
-		return transport.KindTCP, f.Host, nil
-	case f.BLE != "":
-		return transport.KindBLE, f.BLE, nil
-	}
-	cands, err := detect()
-	if err != nil {
-		return 0, "", fmt.Errorf("detect serial devices: %w", err)
-	}
-	switch len(cands) {
-	case 0:
-		return 0, "", errors.New("no Meshtastic device found; use --port, --host or --ble")
-	case 1:
-		return transport.KindSerial, cands[0].Path, nil
-	}
-	var b strings.Builder
-	for _, c := range cands {
-		fmt.Fprintf(&b, "\n  %s", c.Path)
-		if c.Product != "" {
-			fmt.Fprintf(&b, " (%s)", c.Product)
-		}
-	}
-	return 0, "", fmt.Errorf("multiple serial devices found, choose one with --port:%s", b.String())
-}
-
-// defaultDial resolves the flags to a Dialer that re-opens the same target,
-// so the client can reconnect after the node reboots.
-func defaultDial(f ConnFlags) (transport.Dialer, error) {
-	kind, target, err := chooseConn(f, transport.DetectSerial)
-	if err != nil {
-		return nil, err
-	}
-	switch kind {
-	case transport.KindTCP:
-		return func(ctx context.Context) (transport.Conn, error) { return transport.DialTCP(ctx, target, nil) }, nil
-	case transport.KindSerial:
-		return func(ctx context.Context) (transport.Conn, error) { return transport.OpenSerial(ctx, target, nil) }, nil
-	}
-	return func(ctx context.Context) (transport.Conn, error) { return transport.DialBLE(ctx, target, nil) }, nil
-}
-
-// defaultHandshakeTimeout is how long to wait for the node's config dump.
-func defaultHandshakeTimeout(k transport.Kind) time.Duration {
-	if k == transport.KindBLE {
-		return 30 * time.Second
-	}
-	return 15 * time.Second
-}
-
-// kindOf is the transport kind the flags select (serial when auto-detecting).
-func kindOf(f ConnFlags) transport.Kind {
-	switch {
-	case f.BLE != "":
-		return transport.KindBLE
-	case f.Host != "":
-		return transport.KindTCP
-	}
-	return transport.KindSerial
 }
 
 // app is the state shared by all subcommands: dependencies and global flags.
@@ -166,21 +98,21 @@ func (a *app) connectWith(cmd *cobra.Command, backlog bool, adjust func(*device.
 	if err != nil {
 		return nil, err
 	}
-	if r.from != "" && changesNode(cmd) {
-		fmt.Fprintf(a.Stderr, "using %s — %s\n", r, r.from)
+	if r.From != "" && changesNode(cmd) {
+		fmt.Fprintf(a.Stderr, "using %s — %s\n", r, r.From)
 	}
 	opts := device.Options{HandshakeTimeout: a.timeout, MeshTimeout: a.timeout}
 	if opts.HandshakeTimeout == 0 {
-		opts.HandshakeTimeout = defaultHandshakeTimeout(kindOf(r.conn))
+		opts.HandshakeTimeout = nodeconn.HandshakeTimeout(nodeconn.KindOf(r.Flags))
 	}
 	var dial transport.Dialer
 	if a.DaemonSocket != "" && !a.noDaemon {
-		dial, err = a.daemonDialer(r.conn, backlog, opts.HandshakeTimeout)
+		dial, err = a.daemonDialer(r.Flags, backlog, opts.HandshakeTimeout)
 	} else {
-		dial, err = a.Dial(r.conn)
+		dial, err = a.Dial(r.Flags)
 	}
 	if err != nil {
-		return nil, r.wrap(err)
+		return nil, r.Wrap(err)
 	}
 	if a.debug {
 		opts.Log = a.Stderr
@@ -197,7 +129,7 @@ func (a *app) connectWith(cmd *cobra.Command, backlog bool, adjust func(*device.
 	ctx := cmdContext(cmd)
 	c, err := device.Open(ctx, dial, opts)
 	if err != nil && ctx.Err() == nil {
-		err = r.wrap(err)
+		err = r.Wrap(err)
 	}
 	return c, err
 }

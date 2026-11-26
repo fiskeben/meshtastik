@@ -9,41 +9,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"meshtastik/internal/devices"
+	"meshtastik/internal/nodeconn"
 )
-
-// connEnv are the environment variables that choose a connection.
-var connEnv = []string{"MESHTASTIK_DEVICE", "MESHTASTIK_PORT", "MESHTASTIK_HOST", "MESHTASTIK_BLE"}
-
-// fromCurrent is resolvedConn.from for the device saved with `use`.
-const fromCurrent = "the current device"
-
-// resolvedConn is the connection a command uses.
-type resolvedConn struct {
-	conn ConnFlags
-	name string // the named device, if one was chosen
-	from string // why, when not chosen by a flag: fromCurrent or a variable
-}
-
-func (r resolvedConn) String() string {
-	t := devices.Target(r.conn).String()
-	if r.name != "" {
-		return r.name + " (" + t + ")"
-	}
-	return t
-}
-
-// wrap adds to a connection error which node was tried and why, when the
-// command line did not say.
-func (r resolvedConn) wrap(err error) error {
-	if r.from == "" {
-		return err
-	}
-	hint := "pass --port, --host, --ble or --device to use another node"
-	if r.from == fromCurrent {
-		hint = "change it with 'meshtastik use', or " + hint
-	}
-	return fmt.Errorf("%s, %s: %w\n%s", r, r.from, err, hint)
-}
 
 func (a *app) getenv(name string) string {
 	if a.Getenv == nil {
@@ -54,65 +21,10 @@ func (a *app) getenv(name string) string {
 
 func (a *app) loadDevices() (*devices.File, error) { return devices.Load(a.DevicesFile) }
 
-// resolveConn picks the connection: the flags, else the environment, else
-// the current device. With none of these the result is empty, and serial
-// auto-detection picks the port.
-func (a *app) resolveConn() (resolvedConn, error) {
-	if a.conn != (ConnFlags{}) {
-		return resolvedConn{conn: a.conn}, nil
-	}
-	named := func(name, from string) (resolvedConn, error) {
-		f, err := a.loadDevices()
-		if err != nil {
-			return resolvedConn{}, err
-		}
-		t, err := f.Lookup(name)
-		if err != nil {
-			if from != "" {
-				err = fmt.Errorf("%s: %w", from, err)
-			}
-			return resolvedConn{}, err
-		}
-		return resolvedConn{conn: ConnFlags(t), name: name, from: from}, nil
-	}
-	if a.device != "" {
-		return named(a.device, "")
-	}
-	var set []string
-	for _, v := range connEnv {
-		if a.getenv(v) != "" {
-			set = append(set, v)
-		}
-	}
-	switch {
-	case len(set) > 1:
-		return resolvedConn{}, fmt.Errorf("only one of %s may be set; %s are", strings.Join(connEnv, ", "), strings.Join(set, " and "))
-	case len(set) == 1:
-		v := a.getenv(set[0])
-		var c ConnFlags
-		switch set[0] {
-		case "MESHTASTIK_DEVICE":
-			return named(v, "from MESHTASTIK_DEVICE")
-		case "MESHTASTIK_PORT":
-			c.Port = v
-		case "MESHTASTIK_HOST":
-			c.Host = v
-		case "MESHTASTIK_BLE":
-			c.BLE = v
-		}
-		return resolvedConn{conn: c, from: "from " + set[0]}, nil
-	}
-	f, err := a.loadDevices()
-	if err != nil {
-		return resolvedConn{}, err
-	}
-	switch cur := f.Current; {
-	case cur == nil:
-		return resolvedConn{}, nil
-	case cur.Device != "":
-		return named(cur.Device, fromCurrent)
-	}
-	return resolvedConn{conn: ConnFlags(f.Current.Target), from: fromCurrent}, nil
+// resolveConn picks the connection: the flags, else the named device, else
+// the environment, else the current device (see nodeconn.Resolve).
+func (a *app) resolveConn() (nodeconn.Resolved, error) {
+	return nodeconn.Resolve(nodeconn.Selection{Flags: a.conn, Device: a.device, Getenv: a.getenv, DevicesFile: a.DevicesFile})
 }
 
 // changesAnnotation marks commands that change the node or send from it:
@@ -207,13 +119,13 @@ func newUseCmd(a *app) *cobra.Command {
 			if f.Current == nil {
 				fmt.Fprintln(a.Stdout, "No current device; commands look for a serial port.")
 			} else {
-				r := resolvedConn{conn: ConnFlags(f.Current.Target), name: name}
+				r := nodeconn.Resolved{Flags: ConnFlags(f.Current.Target), Name: name}
 				if name != "" {
-					r.conn = ConnFlags(f.Devices[name])
+					r.Flags = ConnFlags(f.Devices[name])
 				}
 				fmt.Fprintf(a.Stdout, "Commands now connect to %s.\n", r)
 			}
-			for _, v := range connEnv {
+			for _, v := range nodeconn.ConnEnv {
 				if a.getenv(v) != "" {
 					fmt.Fprintf(a.Stderr, "note: %s is set, and wins over the current device in this shell\n", v)
 				}
@@ -232,21 +144,21 @@ func (a *app) showCurrent() error {
 		return err
 	}
 	if a.asJSON {
-		v := useJSON{Device: r.name, From: strings.TrimPrefix(r.from, "from ")}
-		if r.conn != (ConnFlags{}) {
-			v.Target = devices.Target(r.conn).String()
+		v := useJSON{Device: r.Name, From: strings.TrimPrefix(r.From, "from ")}
+		if r.Flags != (ConnFlags{}) {
+			v.Target = devices.Target(r.Flags).String()
 		}
 		return printJSON(a.Stdout, v)
 	}
-	if r.conn == (ConnFlags{}) {
+	if r.Flags == (ConnFlags{}) {
 		fmt.Fprintln(a.Stdout, "No current device; commands look for a serial port.\n"+
 			"Choose one with 'meshtastik use <name>' or 'meshtastik use --host <host>' (or --port, --ble).")
 		return nil
 	}
-	if r.from == "" {
-		r.from = "given on the command line"
+	if r.From == "" {
+		r.From = "given on the command line"
 	}
-	fmt.Fprintf(a.Stdout, "%s — %s\n", r, r.from)
+	fmt.Fprintf(a.Stdout, "%s — %s\n", r, r.From)
 	return nil
 }
 
