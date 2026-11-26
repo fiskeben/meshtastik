@@ -143,7 +143,7 @@ func TestHostsDaemonWhenNoneRuns(t *testing.T) {
 	}
 	defer c.Close()
 	st := status(t, e.deps.Socket)
-	if len(st.Links) != 1 || st.Links[0].Clients != 2 || e.d.Dials() != 1 {
+	if len(st.Links) != 1 || st.Links[0].Clients != 2 || e.d.Dials() != 1 || st.Version != version {
 		t.Fatalf("%+v, %d dials", st.Links, e.d.Dials())
 	}
 }
@@ -261,7 +261,9 @@ func TestFirstConnectFailureExits(t *testing.T) {
 	e := newEnv(t)
 	e.d.RefuseDials = true
 	done := make(chan error, 1)
-	go func() { done <- run(context.Background(), []string{"--listen", "127.0.0.1:0", "--host", "fake"}, e.deps) }()
+	go func() {
+		done <- run(context.Background(), []string{"--listen", "127.0.0.1:0", "--host", "fake"}, e.deps)
+	}()
 	select {
 	case err := <-done:
 		if err == nil {

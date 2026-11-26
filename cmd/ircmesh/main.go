@@ -211,7 +211,7 @@ func hostDaemon(ctx context.Context, sock string, d deps, wg *sync.WaitGroup) er
 		return fmt.Errorf("listen on %s: %w", sock, err)
 	}
 	srv := &daemon.Server{
-		Version:     "ircmesh " + version,
+		Version:     version, // same release as meshtastik, so its commands see no mismatch
 		Dial:        func(t daemon.Target) (transport.Dialer, error) { return d.Dial(nodeconn.FlagsFor(t)) },
 		IdleTimeout: daemonIdleTimeout,
 		Log:         d.Stderr,
