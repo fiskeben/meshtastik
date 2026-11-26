@@ -77,7 +77,8 @@ type Server struct {
 	members   *membership
 	chans     [8]*pb.Channel
 	lora      *pb.Config_LoRaConfig
-	names     map[int]string // channel index → #name
+	names     map[int]string       // channel index → #name
+	dbHeard   map[uint32]time.Time // last_heard from the node DB
 	replay    *replay
 	recent    *recent
 	clients   map[*client]struct{}
@@ -88,7 +89,7 @@ type Server struct {
 // New returns a server for cfg.
 func New(cfg Config) *Server {
 	cfg.defaults()
-	return &Server{cfg: cfg, names: map[int]string{}, replay: newReplay(replayPerKey),
+	return &Server{cfg: cfg, names: map[int]string{}, dbHeard: map[uint32]time.Time{}, replay: newReplay(replayPerKey),
 		recent: newRecent(1000), clients: map[*client]struct{}{}}
 }
 
@@ -161,6 +162,9 @@ func (s *Server) applyState(st *device.State) {
 		if num != s.self {
 			s.dir.set(num, st.Nodes[num].GetUser())
 		}
+		if lh := st.Nodes[num].GetLastHeard(); lh != 0 {
+			s.dbHeard[num] = time.Unix(int64(lh), 0)
+		}
 	}
 	s.chans = st.Channels
 	s.lora = st.Config.GetLora()
@@ -183,6 +187,16 @@ func (s *Server) channelIndex(name string) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// lastHeard is when num was last heard, by the server or by the node DB
+// (zero if never). The caller holds s.mu.
+func (s *Server) lastHeard(num uint32) time.Time {
+	t := s.members.lastHeard(num)
+	if db := s.dbHeard[num]; db.After(t) {
+		t = db
+	}
+	return t
 }
 
 // selfNick is the IRC user's nick. The caller holds s.mu.
