@@ -85,6 +85,24 @@ Use a node you can reset. Firmware 2.5 or newer is required. Note firmware versi
 - [ ] If you have a real Python `meshtastic --export-config` output, replace `internal/backup/testdata/python-export.yaml` with it (strip secrets you do not want committed) and run `go test ./internal/backup/`. Result: ______
 - [ ] Import that Python file with `config import` on a node, confirm it applies, then re-import and see `No changes needed.`
 
+## IRC (ircmesh)
+
+Run `ircmesh --device <name>` (or `--host`/`--port`/`--ble`) and repeat with each of irssi, WeeChat and HexChat, using default client settings.
+
+- [ ] The client registers and is renamed to the node's nick. With an emoji short name, the long name is used.
+- [ ] Every channel is joined (`#LongFast` or the primary's name, plus private channels), and each topic shows its index, preset and key type.
+- [ ] Channel member lists match which nodes the Android app shows on each channel.
+- [ ] A message in a channel from the phone app or another node shows up from the right nick. A message sent from IRC arrives on the other device.
+- [ ] `/msg <nick> hi` arrives as a direct message. A DM to a node that is off gives a "not delivered" notice within about 30 s.
+- [ ] `/me waves` arrives as `* <nick> waves`. A reaction and a reply from the app show up quoted.
+- [ ] A message of about 450 characters arrives as 3 messages. One of about 700 is refused with a notice.
+- [ ] With the client disconnected, messages sent to the node are replayed on reconnect (with timestamps in WeeChat/HexChat).
+- [ ] Two clients at once: what one sends shows up in the other.
+- [ ] `meshtastik send "from cli"` shows up in IRC from your nick.
+- [ ] Rebooting the node gives "mesh link down" and then "mesh link back up" notices; messages sent in between are refused, not sent late.
+- [ ] Renaming a channel with `meshtastik channel` makes clients leave the old name and join the new one within 10 minutes (or right after a reboot).
+- [ ] `--listen 0.0.0.0:6667` without a password is refused. With `MESHTASTIK_IRC_PASSWORD` set, a client without the password is rejected.
+
 ## Wrap-up
 
 - [ ] Restore the node from `pre-test.yaml`: `config import pre-test.yaml --keys`.

@@ -3,6 +3,9 @@ PKG     := ./cmd/meshtastik
 DIST    := dist
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X meshtastik/internal/cli.version=$(VERSION)
+IRC_BINARY  := ircmesh
+IRC_PKG     := ./cmd/ircmesh
+IRC_LDFLAGS := -s -w -X main.version=$(VERSION)
 GORELEASER ?= go run github.com/goreleaser/goreleaser/v2@v2.20.3
 
 # Linux and Windows build without cgo; macOS needs cgo (BLE stack and
@@ -26,6 +29,7 @@ check: vet race
 
 build:
 	go build -ldflags '$(LDFLAGS)' -o $(BINARY) $(PKG)
+	go build -ldflags '$(IRC_LDFLAGS)' -o $(IRC_BINARY) $(IRC_PKG)
 
 build-all: $(CROSS) darwin/native
 
@@ -33,10 +37,14 @@ $(CROSS):
 	CGO_ENABLED=0 GOOS=$(word 1,$(subst /, ,$@)) GOARCH=$(word 2,$(subst /, ,$@)) \
 		go build -ldflags '$(LDFLAGS)' \
 		-o $(DIST)/$(BINARY)-$(subst /,-,$@)$(if $(findstring windows,$@),.exe) $(PKG)
+	CGO_ENABLED=0 GOOS=$(word 1,$(subst /, ,$@)) GOARCH=$(word 2,$(subst /, ,$@)) \
+		go build -ldflags '$(IRC_LDFLAGS)' \
+		-o $(DIST)/$(IRC_BINARY)-$(subst /,-,$@)$(if $(findstring windows,$@),.exe) $(IRC_PKG)
 
 darwin/native:
 	@if [ "$$(go env GOOS)" = darwin ]; then \
-		go build -ldflags '$(LDFLAGS)' -o $(DIST)/$(BINARY)-darwin-$$(go env GOARCH) $(PKG); \
+		go build -ldflags '$(LDFLAGS)' -o $(DIST)/$(BINARY)-darwin-$$(go env GOARCH) $(PKG) && \
+		go build -ldflags '$(IRC_LDFLAGS)' -o $(DIST)/$(IRC_BINARY)-darwin-$$(go env GOARCH) $(IRC_PKG); \
 	else \
 		echo "skipping darwin: build it on a Mac (needs cgo)"; \
 	fi
@@ -51,4 +59,4 @@ snapshot:
 	HOMEBREW_TAP_GITHUB_TOKEN=unused $(GORELEASER) release --snapshot --clean
 
 clean:
-	rm -rf $(BINARY) $(DIST)
+	rm -rf $(BINARY) $(IRC_BINARY) $(DIST)

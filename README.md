@@ -74,6 +74,25 @@ Commands connect to the node through a background daemon. The first command star
 - `--no-daemon`, or `MESHTASTIK_NO_DAEMON=1`, connects directly as before. A serial port the daemon holds can't be opened directly at the same time; run `meshtastik daemon stop` first.
 - After upgrading meshtastik, commands note that the daemon runs the old version until you run `meshtastik daemon restart`.
 
+## IRC (ircmesh)
+
+`ircmesh` is a second program in the same install. It serves your node as an IRC server, so you can chat on the mesh from any IRC client (irssi, WeeChat, HexChat, …). Like a bouncer, it stays connected while no client is, and you can attach several clients at once.
+
+```
+ircmesh --device home
+```
+
+Then connect your IRC client to `127.0.0.1` port `6667` (`/connect 127.0.0.1 6667` in irssi). It picks the node the same way meshtastik does (`--device`, `--host`, `--port`, `--ble`, the `MESHTASTIK_*` variables, or the current device), and goes through the daemon, starting one itself if none is running.
+
+- **You are the node.** Your nick is the node's short name, or its long name when the short name is an emoji, and can't be changed from IRC.
+- **Channels are the node's channels.** The primary channel is named after its preset when it has no name (`#LongFast`). You join every channel on connect. `/part` hides a channel for that client only.
+- **Other nodes are users.** A node shows up in a channel once it has been heard there, and leaves after 24 hours without being heard there (`--active`). `/whois <nick>` shows when it was last heard, and you can `/msg` any node the node knows, even an offline one.
+- **Messages:** `/msg <nick>` sends a direct message and tells you if it isn't acknowledged. Long messages are split into up to three packets; anything longer is refused. `/me` is sent as `* <nick> …`. Reactions and replies from the apps show up quoted.
+- **While you're away**, up to 100 messages per channel and per person are kept, and the next client to connect gets them (with timestamps if it supports `server-time`).
+- **Off this machine:** with `--listen 0.0.0.0:6667` or any address that isn't loopback, set a password with `MESHTASTIK_IRC_PASSWORD` or `--password-file`, and consider `--tls-cert`/`--tls-key`.
+
+Known gaps: messages you send from the phone app over Bluetooth don't show up in IRC (the node doesn't pass them on), but ones sent with `meshtastik send` do. While ircmesh runs the daemon, `meshtastik daemon stop` stops it only until ircmesh starts it again.
+
 ## Remote admin
 
 With `--dest <node>`, admin commands act on another node over the mesh instead of the one you are connected to: a solar repeater on a roof, a node at a cabin. `<node>` is a `!hex` id, a number or a name from the connected node's node list.

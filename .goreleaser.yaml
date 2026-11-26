@@ -31,6 +31,30 @@ builds:
     ldflags: -s -w -X meshtastik/internal/cli.version={{ .Version }}
     mod_timestamp: "{{ .CommitTimestamp }}"
 
+  # ircmesh: the IRC bridge, built the same two ways.
+  - id: darwin-ircmesh
+    main: ./cmd/ircmesh
+    binary: ircmesh
+    env: [CGO_ENABLED=1]
+    goos: [darwin]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: -s -w -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+  - id: other-ircmesh
+    main: ./cmd/ircmesh
+    binary: ircmesh
+    env: [CGO_ENABLED=0]
+    goos: [linux, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: windows
+        goarch: arm64
+    flags: [-trimpath]
+    ldflags: -s -w -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
 archives:
   - formats: [tar.gz]
     format_overrides:
@@ -65,9 +89,9 @@ release:
 
 homebrew_casks:
   - name: meshtastik
-    binaries: [meshtastik]
+    binaries: [meshtastik, ircmesh]
     homepage: https://github.com/fiskeben/meshtastik
-    description: Administer a local Meshtastic radio node over serial, TCP or BLE
+    description: Administer a local Meshtastic radio node over serial, TCP or BLE, and chat on the mesh from IRC
     repository:
       owner: fiskeben
       name: homebrew-tap
@@ -80,9 +104,10 @@ homebrew_casks:
     skip_upload: auto
     hooks:
       post:
-        # The binary isn't signed or notarized; without this, Gatekeeper
+        # The binaries aren't signed or notarized; without this, Gatekeeper
         # refuses to run a quarantined download.
         install_steps: |
           on_macos do
             run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/meshtastik"]
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/ircmesh"]
           end
