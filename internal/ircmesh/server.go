@@ -43,6 +43,9 @@ type Config struct {
 	// SendInterval (default 2s) is the least time between packets sent;
 	// DMTimeout (default 30s) how long a direct message waits for its ack.
 	SendInterval, DMTimeout time.Duration
+	// OnReady, when set, is called once the node is connected and clients
+	// are about to be accepted.
+	OnReady func()
 }
 
 func (c *Config) defaults() {
@@ -132,6 +135,9 @@ func (s *Server) Run(ctx context.Context, ln net.Listener) error {
 		<-ctx.Done()
 		ln.Close()
 	}()
+	if s.cfg.OnReady != nil {
+		s.cfg.OnReady()
+	}
 	for {
 		conn, err := ln.Accept()
 		if err != nil {

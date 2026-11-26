@@ -134,3 +134,16 @@ func TestFirstOpenFailureIsFatal(t *testing.T) {
 		t.Fatal("listener still accepting")
 	}
 }
+
+func TestOnReadyAfterConnecting(t *testing.T) {
+	ready := make(chan bool, 1)
+	h := newHarness(t, newFake(), func(c *Config) {
+		c.OnReady = func() { ready <- true }
+	})
+	select {
+	case <-ready:
+	case <-time.After(3 * time.Second):
+		t.Fatal("OnReady not called")
+	}
+	h.dial(t).register("foo")
+}
