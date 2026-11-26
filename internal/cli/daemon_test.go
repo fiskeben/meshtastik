@@ -165,7 +165,7 @@ func TestListenAndSendAtTheSameTime(t *testing.T) {
 	}
 	res := make(chan result, 1)
 	go func() {
-		out, _, err := td.run(t, ctx, "listen", "-f", "--count", "1")
+		out, _, err := td.run(t, ctx, "listen", "-f", "--count", "2")
 		res <- result{out, err}
 	}()
 	time.Sleep(200 * time.Millisecond) // let listen attach
@@ -175,7 +175,8 @@ func TestListenAndSendAtTheSameTime(t *testing.T) {
 	d.Inject(text(42, 0xffffffff, "see you"))
 	select {
 	case r := <-res:
-		if r.err != nil || !strings.Contains(r.out, ": see you") {
+		// listen sees what send said through the daemon, then the reply.
+		if r.err != nil || !strings.Contains(r.out, "Test Node (TEST)  → Car (CAR1)  : on my way") || !strings.Contains(r.out, ": see you") {
 			t.Fatal(r.out, r.err)
 		}
 	case <-time.After(3 * time.Second):

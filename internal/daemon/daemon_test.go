@@ -346,3 +346,56 @@ func TestRemoteAdminDoesNotStaleTheCache(t *testing.T) {
 		t.Fatal("local admin did not make the daemon re-read the node")
 	}
 }
+
+// textWithin returns the next text packet c receives within wait, or nil.
+func textWithin(c *device.Client, wait time.Duration) *pb.MeshPacket {
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	defer cancel()
+	var got *pb.MeshPacket
+	c.Listen(ctx, func(m *pb.FromRadio) error {
+		if p := m.GetPacket(); p.GetDecoded().GetPortnum() == pb.PortNum_TEXT_MESSAGE_APP {
+			got = p
+			return errors.New("got one")
+		}
+		return nil
+	})
+	return got
+}
+
+func TestTextFromOneClientReachesTheOthers(t *testing.T) {
+	d := fakedevice.New()
+	h := start(t, d, 0)
+	a := h.open(t, false)
+	b := h.open(t, false)
+	if err := a.SendText(context.Background(), "hi", device.Broadcast, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	p := textWithin(b, 3*time.Second)
+	if string(p.GetDecoded().GetPayload()) != "hi" || p.GetFrom() != d.NodeNum || p.GetRxTime() != 0 {
+		t.Fatalf("%v", p)
+	}
+}
+
+func TestSenderDoesNotGetItsOwnTextBack(t *testing.T) {
+	h := start(t, fakedevice.New(), 0)
+	a := h.open(t, false)
+	h.open(t, false)
+	if err := a.SendText(context.Background(), "hi", device.Broadcast, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	if p := textWithin(a, 300*time.Millisecond); p != nil {
+		t.Fatalf("sender got %v", p)
+	}
+}
+
+func TestEchoesSkipTheBacklog(t *testing.T) {
+	h := start(t, fakedevice.New(), 0)
+	a := h.open(t, false)
+	if err := a.SendText(context.Background(), "hi", device.Broadcast, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if p := textWithin(h.open(t, true), 300*time.Millisecond); p != nil {
+		t.Fatalf("backlog had %v", p)
+	}
+}

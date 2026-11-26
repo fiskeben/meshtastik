@@ -512,5 +512,27 @@ func (s *session) handle(ctx context.Context, m *pb.ToRadio) bool {
 		s.h.s.logf("%s: relaying to the node: %v", s.h.target, err)
 		return false
 	}
+	if p := m.GetPacket(); p.GetDecoded().GetPortnum() == pb.PortNum_TEXT_MESSAGE_APP {
+		s.h.echo(s, p, c.State().MyInfo.GetMyNodeNum())
+	}
 	return true
+}
+
+// echo offers text a client sent to the node to every other session, as
+// sent by the node itself, so they see what other commands say. The node
+// does not echo it, and it never enters the backlog.
+func (h *hub) echo(from *session, p *pb.MeshPacket, me uint32) {
+	p = proto.Clone(p).(*pb.MeshPacket)
+	if p.From == 0 {
+		p.From = me
+	}
+	p.ClearRxTime()
+	m := &pb.FromRadio{PayloadVariant: &pb.FromRadio_Packet{Packet: p}}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for s := range h.sessions {
+		if s != from {
+			s.offer(m)
+		}
+	}
 }

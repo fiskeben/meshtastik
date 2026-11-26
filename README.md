@@ -67,7 +67,7 @@ Other global flags: `--json`, `--yes` (skip confirmations), `--debug`, `--timeou
 
 ## The daemon
 
-Commands connect to the node through a background daemon. The first command starts it, and it keeps the node connection open between commands, so later commands start at once instead of waiting for the node's config dump. Several commands can use a node at the same time (`listen -f` in one terminal, `send` in another), and messages that arrive between `listen` runs are kept for the next one (up to 256).
+Commands connect to the node through a background daemon. The first command starts it, and it keeps the node connection open between commands, so later commands start at once instead of waiting for the node's config dump. Several commands can use a node at the same time (`listen -f` in one terminal, `send` in another), and messages that arrive between `listen` runs are kept for the next one (up to 256). `listen` also shows text that other commands send through the daemon, as sent by your node.
 
 - One daemon per user holds a connection to each node you've used (one per `--port`/`--host`/`--ble` value). A connection with no commands using it is closed after 30 minutes, and the daemon exits once it has none left.
 - It listens on a socket only you can open: `$MESHTASTIK_SOCKET`, else `$XDG_RUNTIME_DIR/meshtastik.sock`, else `meshtastik-<uid>.sock` in the temporary directory. Its log sits next to the socket (`.log`); `daemon status` shows both paths.
