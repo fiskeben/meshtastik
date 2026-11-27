@@ -17,6 +17,34 @@ func TestChannelTextFromMember(t *testing.T) {
 	c.expect(`^:AS02!1bf0411d@mesh PRIVMSG #Ryfylke :?hei$`)
 }
 
+func TestMentionsResolveToNicks(t *testing.T) {
+	h := newHarness(t, withNodes(newFake()), nil)
+	c := h.dial(t)
+	c.register("foo")
+	h.d.Inject(rx(arveNum, 4, "@!1bf0411d hi"))
+	c.expect(`^:AS02!1bf0411d@mesh PRIVMSG #Ryfylke :AS02: hi$`)
+	h.d.Inject(rx(arveNum, 4, "hey @!ab2c9b0a, ok"))
+	c.expect(`^:AS02!1bf0411d@mesh PRIVMSG #Ryfylke :hey Ricco:, ok$`)
+}
+
+func TestMentionsFollowRenames(t *testing.T) {
+	h := newHarness(t, withNodes(newFake()), nil)
+	first := h.dial(t)
+	first.register("foo")
+	h.d.Inject(rx(arveNum, 4, "@!1bf0411d hi"))
+	first.expect(`PRIVMSG #Ryfylke :AS02: hi$`)
+
+	b, _ := proto.Marshal(&pb.User{ShortName: "AT", LongName: "Arve Tak"})
+	p := rx(arveNum, 4, "")
+	p.GetDecoded().Portnum, p.GetDecoded().Payload = pb.PortNum_NODEINFO_APP, b
+	h.d.Inject(p)
+	first.expect(`^:AS02!1bf0411d@mesh NICK :?AT$`)
+
+	second := h.dial(t)
+	second.register("bar")
+	second.expect(`^:AT!1bf0411d@mesh PRIVMSG #Ryfylke :AT: hi$`)
+}
+
 func TestTextFromNewChannelJoinsFirst(t *testing.T) {
 	h := newHarness(t, withNodes(newFake()), nil)
 	c := h.dial(t)

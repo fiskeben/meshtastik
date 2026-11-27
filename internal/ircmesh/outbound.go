@@ -63,6 +63,7 @@ func (s *Server) cmdPrivmsg(c *client, m irc.Message) {
 		}
 	}
 	text = strings.TrimSpace(irc.StripFormatting(text))
+	text = encodeMentions(text, s.dir)
 	if text == "" {
 		return
 	}

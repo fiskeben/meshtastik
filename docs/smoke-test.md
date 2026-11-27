@@ -96,6 +96,7 @@ Run `ircmesh --device <name>` (or `--host`/`--port`/`--ble`) and repeat with eac
 - [ ] `/msg <nick> hi` arrives as a direct message. A DM to a node that is off gives a "not delivered" notice within about 30 s.
 - [ ] Optional, with a client that shows reactions (gamja, Goguma): a DM to a node that is on gets ✅ on the message, and one to a node that is off gets ❌ along with the notice. What you send shows up once, not twice (`echo-message`).
 - [ ] `/me waves` arrives as `* <nick> waves`. A reaction and a reply from the app show up quoted.
+- [ ] A mention from the app (`@!<hex>`) shows up as `<nick>:`, and typing `<nick>:` in IRC arrives as a mention that highlights the node in the app.
 - [ ] A message of about 450 characters arrives as 3 messages. One of about 700 is refused with a notice.
 - [ ] Messages from before the client connected, including ones you sent from IRC, are replayed on connect (with their original timestamps in WeeChat/HexChat), and again on every later connect.
 - [ ] Optional, with a `draft/chathistory` client (gamja, Goguma, senpai): nothing is replayed on connect, the client loads recent history itself, and scrolling back loads older messages.

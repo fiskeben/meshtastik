@@ -30,7 +30,7 @@ type histEntry struct {
 	At   time.Time // UTC, whole milliseconds, unique and increasing
 	Key  histKey
 	From uint32
-	Text string // as sent to IRC clients, a CTCP ACTION for reactions
+	Text string // the mesh text with mention tokens; a CTCP ACTION for reactions
 	Mark *mark  // the delivery status of a line sent from IRC; nil: none
 }
 
