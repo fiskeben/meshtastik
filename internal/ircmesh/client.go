@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"maps"
 	"net"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -39,6 +41,12 @@ type client struct {
 	caps        map[string]bool // capabilities enabled
 	parted      map[int]bool    // channel indexes this client has left
 	overflowing bool
+
+	// While a labeled command is handled, what it sends c is collected
+	// here to be labeled, and hanging up waits until it is sent.
+	collecting bool
+	collected  []irc.Message
+	hangAfter  bool
 }
 
 func (c *client) close() {
@@ -58,9 +66,19 @@ func (c *client) target() string {
 
 // queue sends m to the client without blocking. A client too slow to keep
 // up is dropped. The caller holds s.mu.
-func (c *client) queue(m irc.Message) { c.queueLine(m.String()) }
+func (c *client) queue(m irc.Message) {
+	if c.collecting {
+		c.collected = append(c.collected, m)
+		return
+	}
+	c.queueLine(m.String())
+}
 
 func (c *client) queueLine(l string) {
+	if l == "" && c.collecting {
+		c.hangAfter = true
+		return
+	}
 	if c.overflowing {
 		return
 	}
@@ -169,6 +187,10 @@ func (c *client) watchdog() {
 
 // handle acts on one message from c. The caller holds s.mu.
 func (s *Server) handle(c *client, m irc.Message) {
+	if label := m.Tags["label"]; label != "" && c.caps[capLabeledResponse] {
+		c.collecting = true
+		defer s.sendLabeled(c, label)
+	}
 	switch m.Command {
 	case "CAP":
 		s.handleCap(c, m)
@@ -228,18 +250,63 @@ func (s *Server) handle(c *client, m irc.Message) {
 	c.queue(s.numeric(c, "421", m.Command, "Unknown command"))
 }
 
+// sendLabeled sends what a command labeled label collected for c, as IRCv3
+// labeled-response asks: an ACK for nothing, one labeled line, or a
+// labeled-response batch of several (without the batch capability, only the
+// first line is labeled). The caller holds s.mu.
+func (s *Server) sendLabeled(c *client, label string) {
+	ms := c.collected
+	c.collecting, c.collected = false, nil
+	switch {
+	case len(ms) == 0:
+		c.queue(withTag(irc.Message{Prefix: serverName, Command: "ACK"}, "label", label))
+	case len(ms) == 1 || !c.caps[capBatch]:
+		c.queue(withTag(ms[0], "label", label))
+		for _, m := range ms[1:] {
+			c.queue(m)
+		}
+	default:
+		s.batches++
+		ref := strconv.FormatUint(s.batches, 36)
+		c.queue(withTag(irc.Message{Prefix: serverName, Command: "BATCH", Params: []string{"+" + ref, "labeled-response"}}, "label", label))
+		for _, m := range ms {
+			if _, nested := m.Tags["batch"]; !nested {
+				m = withTag(m, "batch", ref)
+			}
+			c.queue(m)
+		}
+		c.queue(irc.Message{Prefix: serverName, Command: "BATCH", Params: []string{"-" + ref}})
+	}
+	if c.hangAfter {
+		c.hangAfter = false
+		c.queueLine("")
+	}
+}
+
+// withTag is m with tag k set to v, leaving m's tags, which other clients
+// may share, as they were.
+func withTag(m irc.Message, k, v string) irc.Message {
+	tags := make(map[string]string, len(m.Tags)+1)
+	maps.Copy(tags, m.Tags)
+	tags[k] = v
+	m.Tags = tags
+	return m
+}
+
 // commands are the handlers for registered clients, by command.
 var commands = map[string]func(s *Server, c *client, m irc.Message){}
 
 // Capabilities the server offers.
 const (
-	capBatch       = "batch"
-	capChathistory = "draft/chathistory"
-	capMessageTags = "message-tags"
-	capServerTime  = "server-time"
+	capBatch           = "batch"
+	capChathistory     = "draft/chathistory"
+	capEchoMessage     = "echo-message"
+	capLabeledResponse = "labeled-response"
+	capMessageTags     = "message-tags"
+	capServerTime      = "server-time"
 )
 
-var offeredCaps = []string{capBatch, capChathistory, capMessageTags, capServerTime}
+var offeredCaps = []string{capBatch, capChathistory, capEchoMessage, capLabeledResponse, capMessageTags, capServerTime}
 
 // handleCap negotiates capabilities.
 func (s *Server) handleCap(c *client, m irc.Message) {

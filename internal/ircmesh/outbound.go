@@ -22,8 +22,15 @@ type sendJob struct {
 	channel int
 	target  string // the IRC target, for notices
 	parts   []string
-	ids     []uint32
+	ids     []uint32 // packet ids, by part
+	msgids  []string // IRC msgids, by part
 }
+
+// The marks on direct messages: delivered (acked by the recipient) and not.
+const (
+	markDelivered = "✅"
+	markFailed    = "❌"
+)
 
 // sendQueueLen is how many messages may wait for the radio.
 const sendQueueLen = 64
@@ -88,30 +95,33 @@ func (s *Server) cmdPrivmsg(c *client, m irc.Message) {
 		c.queue(s.notice(me, "mesh link is down; message not sent"))
 		return
 	}
-	job.parts = parts
-	for _, p := range parts {
-		id := device.NewPacketID()
-		job.ids = append(job.ids, id)
-		s.recent.add(id, p)
-	}
-	select {
-	case s.sendQ <- job:
-	default:
+	// Only this handler, under s.mu, adds to the queue, so it has room
+	// until the send below.
+	if len(s.sendQ) == cap(s.sendQ) {
 		c.queue(s.notice(me, "too many messages waiting for the radio; message not sent"))
 		return
 	}
-	key := histKey{Channel: job.channel}
-	if job.to != device.Broadcast {
-		key = histKey{Channel: -1, Peer: job.to}
-	}
+	job.parts = parts
 	for _, p := range parts {
-		e := s.history.add(key, s.self, p, s.cfg.Now())
+		id := device.NewPacketID()
+		s.recent.add(id, p)
+		e := s.history.add(job.key(), s.self, p, s.cfg.Now())
+		job.ids, job.msgids = append(job.ids, id), append(job.msgids, e.ID)
 		for _, other := range s.registered() {
-			if other != c {
+			if other != c || c.caps[capEchoMessage] {
 				s.deliver(other, e, "")
 			}
 		}
 	}
+	s.sendQ <- job
+}
+
+// key is the history key of the job's messages.
+func (j sendJob) key() histKey {
+	if j.to != device.Broadcast {
+		return histKey{Channel: -1, Peer: j.to}
+	}
+	return histKey{Channel: j.channel}
 }
 
 // closing reports whether ctx was cancelled (the link is being torn down),
@@ -152,18 +162,25 @@ func (s *Server) sender(ctx context.Context, m Mesh, q <-chan sendJob) {
 				}
 			}
 			last = time.Now()
-			id := job.ids[i]
+			id, msgid := job.ids[i], job.msgids[i]
 			if job.to != device.Broadcast {
 				s.wg.Add(1)
 				go func() {
 					defer s.wg.Done()
 					ctx, cancel := context.WithTimeout(ctx, s.cfg.DMTimeout)
 					defer cancel()
-					if err := m.SendTextID(ctx, id, part, job.to, 0, true); err != nil && !errors.Is(err, context.Canceled) && !closing(ctx) {
-						s.mu.Lock()
-						s.toAll(s.notice(s.selfNick(), fmt.Sprintf("message to %s not delivered (%v): %q", job.target, err, quote(part))))
-						s.mu.Unlock()
+					err := m.SendTextID(ctx, id, part, job.to, 0, true)
+					if err != nil && (errors.Is(err, context.Canceled) || closing(ctx)) {
+						return
 					}
+					s.mu.Lock()
+					defer s.mu.Unlock()
+					if err != nil {
+						s.toAll(s.notice(s.selfNick(), fmt.Sprintf("message to %s not delivered (%v): %q", job.target, err, quote(part))))
+						s.setMark(job.key(), msgid, markFailed, s.self)
+						return
+					}
+					s.setMark(job.key(), msgid, markDelivered, job.to)
 				}()
 				continue
 			}

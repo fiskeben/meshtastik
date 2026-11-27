@@ -75,16 +75,9 @@ func (s *Server) text(p *pb.MeshPacket) {
 // batch reference unless empty. ok is false when e's channel is gone. The
 // caller holds s.mu.
 func (s *Server) histMessage(c *client, e histEntry, batch string) (m irc.Message, ok bool) {
-	var target string
-	switch {
-	case e.Key.Channel >= 0:
-		if target, ok = s.names[e.Key.Channel]; !ok {
-			return irc.Message{}, false
-		}
-	case e.From == s.self:
-		target = s.dir.nick(e.Key.Peer)
-	default:
-		target = s.selfNick()
+	target, ok := s.entryTarget(e.Key, e.From)
+	if !ok {
+		return irc.Message{}, false
 	}
 	m = irc.Message{Prefix: s.dir.mask(e.From), Command: "PRIVMSG", Params: []string{target, e.Text}}
 	tags := map[string]string{}
@@ -103,10 +96,62 @@ func (s *Server) histMessage(c *client, e histEntry, batch string) (m irc.Messag
 	return m, true
 }
 
-// deliver queues e for c. The caller holds s.mu.
+// markMessage is e's mark as c sees it: a TAGMSG reacting to e. ok is false
+// when e has no mark, c doesn't take tags or e's channel is gone. The caller
+// holds s.mu.
+func (s *Server) markMessage(c *client, e histEntry, batch string) (m irc.Message, ok bool) {
+	if e.Mark == nil || !c.caps[capMessageTags] {
+		return irc.Message{}, false
+	}
+	target, ok := s.entryTarget(e.Key, e.Mark.From)
+	if !ok {
+		return irc.Message{}, false
+	}
+	tags := map[string]string{"+draft/reply": e.ID, "+draft/react": e.Mark.Emoji}
+	if c.caps[capServerTime] {
+		tags["time"] = e.Mark.At.Format(serverTimeFormat)
+	}
+	if batch != "" {
+		tags["batch"] = batch
+	}
+	return irc.Message{Tags: tags, Prefix: s.dir.mask(e.Mark.From), Command: "TAGMSG", Params: []string{target}}, true
+}
+
+// entryTarget is where a message of k from node from goes: the channel, or
+// the other end of the DM. ok is false when the channel is gone. The caller
+// holds s.mu.
+func (s *Server) entryTarget(k histKey, from uint32) (target string, ok bool) {
+	switch {
+	case k.Channel >= 0:
+		target, ok = s.names[k.Channel]
+		return target, ok
+	case from == s.self:
+		return s.dir.nick(k.Peer), true
+	default:
+		return s.selfNick(), true
+	}
+}
+
+// deliver queues e for c, followed by its mark. The caller holds s.mu.
 func (s *Server) deliver(c *client, e histEntry, batch string) {
 	if m, ok := s.histMessage(c, e, batch); ok {
 		c.queue(m)
+	}
+	if m, ok := s.markMessage(c, e, batch); ok {
+		c.queue(m)
+	}
+}
+
+// setMark records emoji, reacted by from, as the delivery status of line id
+// of k and shows it to the clients. The caller holds s.mu.
+func (s *Server) setMark(k histKey, id, emoji string, from uint32) {
+	m := mark{Emoji: emoji, From: from, At: s.cfg.Now().UTC().Truncate(time.Millisecond)}
+	s.history.setMark(k, id, m)
+	e := histEntry{ID: id, Key: k, Mark: &m}
+	for _, c := range s.registered() {
+		if tm, ok := s.markMessage(c, e, ""); ok {
+			c.queue(tm)
+		}
 	}
 }
 

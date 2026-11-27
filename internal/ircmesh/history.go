@@ -31,6 +31,15 @@ type histEntry struct {
 	Key  histKey
 	From uint32
 	Text string // as sent to IRC clients, a CTCP ACTION for reactions
+	Mark *mark  // the delivery status of a line sent from IRC; nil: none
+}
+
+// mark is a line's delivery status, shown to clients as an IRCv3 reaction
+// (+draft/react) on it.
+type mark struct {
+	Emoji string
+	From  uint32 // who reacts: the recipient for delivered, the user for failed
+	At    time.Time
 }
 
 // history keeps the last perKey lines of every channel and DM peer, for
@@ -97,6 +106,17 @@ func (h *history) find(id string) (histEntry, bool) {
 		}
 	}
 	return histEntry{}, false
+}
+
+// setMark sets the mark of line id of k, if it is kept.
+func (h *history) setMark(k histKey, id string, m mark) {
+	es := h.byKey[k]
+	for i := len(es) - 1; i >= 0; i-- {
+		if es[i].ID == id {
+			es[i].Mark = &m
+			return
+		}
+	}
 }
 
 // dropChannel forgets the lines of a channel index.
