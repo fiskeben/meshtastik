@@ -79,7 +79,7 @@ func (s *Server) histMessage(c *client, e histEntry, batch string) (m irc.Messag
 	if !ok {
 		return irc.Message{}, false
 	}
-	m = irc.Message{Prefix: s.dir.mask(e.From), Command: "PRIVMSG", Params: []string{target, e.Text}}
+	m = irc.Message{Prefix: s.dir.mask(e.From), Command: "PRIVMSG", Params: []string{target, resolveMentions(e.Text, s.dir)}}
 	tags := map[string]string{}
 	if c.caps[capServerTime] {
 		tags["time"] = e.At.Format(serverTimeFormat)

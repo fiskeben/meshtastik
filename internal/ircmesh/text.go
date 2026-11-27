@@ -3,6 +3,7 @@ package ircmesh
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -52,6 +53,71 @@ func dropControls(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// isHex reports whether b is a hexadecimal digit.
+func isHex(b byte) bool {
+	return b >= '0' && b <= '9' || b >= 'a' && b <= 'f' || b >= 'A' && b <= 'F'
+}
+
+// resolveMentions turns Meshtastic mention tokens, @! and the 8 hex digits
+// of a node number, into the node's nick and a colon, as IRC clients expect
+// when someone addresses them.
+func resolveMentions(text string, d *directory) string {
+	var b strings.Builder
+	for i := 0; i < len(text); {
+		if text[i] == '@' && i+10 <= len(text) && text[i+1] == '!' && hexDigits(text[i+2:i+10]) &&
+			(i+10 == len(text) || !isHex(text[i+10])) {
+			num, _ := strconv.ParseUint(text[i+2:i+10], 16, 32)
+			b.WriteString(d.nick(uint32(num)))
+			b.WriteByte(':')
+			i += 10
+			continue
+		}
+		b.WriteByte(text[i])
+		i++
+	}
+	return b.String()
+}
+
+// hexDigits reports whether s is all hexadecimal digits.
+func hexDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if !isHex(s[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// encodeMentions turns IRC mentions, a node's nick followed by a colon and
+// whitespace or the end, into Meshtastic mention tokens, @! and the 8 hex
+// digits of its node number. A nick preceded by @ is left alone.
+func encodeMentions(text string, d *directory) string {
+	var b strings.Builder
+	for i := 0; i < len(text); {
+		if !nickRune(rune(text[i])) {
+			b.WriteByte(text[i])
+			i++
+			continue
+		}
+		j := i
+		for j < len(text) && nickRune(rune(text[j])) {
+			j++
+		}
+		mention := j < len(text) && text[j] == ':' &&
+			(j+1 == len(text) || text[j+1] == ' ' || text[j+1] == '\t')
+		if mention && (i == 0 || text[i-1] != '@') {
+			if num, ok := d.lookup(text[i:j]); ok {
+				fmt.Fprintf(&b, "@!%08x", num)
+				i = j + 1 // past the colon
+				continue
+			}
+		}
+		b.WriteString(text[i:j])
+		i = j
+	}
+	return b.String()
 }
 
 // meshLines is a text payload as valid UTF-8 lines without control

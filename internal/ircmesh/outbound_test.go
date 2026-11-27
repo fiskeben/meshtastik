@@ -46,6 +46,19 @@ func TestChannelSend(t *testing.T) {
 	}
 }
 
+func TestMentionSentToMesh(t *testing.T) {
+	h := newHarness(t, withNodes(newFake()), nil)
+	a := h.dial(t)
+	a.register("foo")
+	b := h.dial(t)
+	b.register("bar")
+	a.send("PRIVMSG #Ryfylke :AS02: hi")
+	if p := texts(t, h.d, 1)[0]; payload(p) != "@!1bf0411d hi" {
+		t.Fatal(payload(p))
+	}
+	b.expect(`^:Ricco!ab2c9b0a@mesh PRIVMSG #Ryfylke :AS02: hi$`)
+}
+
 func TestDirectSend(t *testing.T) {
 	d := withNodes(newFake())
 	d.AckTexts = true
