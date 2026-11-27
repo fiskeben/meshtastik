@@ -83,6 +83,28 @@ func TestAutoJoin(t *testing.T) {
 	c.expect(` 366 Ricco #Ryfylke `)
 }
 
+func TestLongNicks(t *testing.T) {
+	d := withNodes(newFake())
+	d.Owner.ShortName, d.Owner.LongName = "RF", "Ricco F"
+	h := newHarness(t, d, func(c *Config) { c.LongNicks = true })
+	c := h.dial(t)
+	c.send("NICK foo")
+	c.send("USER u 0 * :r")
+	c.expect(` 005 Ricco_F .*NICKLEN=32 `)
+	c.expect(` 353 Ricco_F = #Ryfylke :Ricco_F Arve_Tak$`)
+}
+
+func TestShortNicksByDefault(t *testing.T) {
+	d := withNodes(newFake())
+	d.Owner.ShortName, d.Owner.LongName = "RF", "Ricco F"
+	h := newHarness(t, d, nil)
+	c := h.dial(t)
+	c.send("NICK foo")
+	c.send("USER u 0 * :r")
+	c.expect(` 005 RF .*NICKLEN=16 `)
+	c.expect(` 353 RF = #Ryfylke :RF AS02$`)
+}
+
 func TestPingPong(t *testing.T) {
 	h := newHarness(t, newFake(), nil)
 	c := h.dial(t)

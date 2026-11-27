@@ -313,3 +313,31 @@ func TestHistoryFlagNotNegative(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestLongNicksFlag(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{{nil, "NICKLEN=16"}, {[]string{"--long-nicks"}, "NICKLEN=32"}} {
+		t.Run(tc.want, func(t *testing.T) {
+			e := newEnv(t)
+			a := e.start(append([]string{"--listen", "127.0.0.1:0", "--host", "fake"}, tc.args...)...)
+			conn := dialIRC(t, a)
+			fmt.Fprint(conn, "NICK foo\r\nUSER u 0 * :r\r\n")
+			r := bufio.NewReader(conn)
+			conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			for {
+				l, err := r.ReadString('\n')
+				if err != nil {
+					t.Fatalf("no %s in the welcome", tc.want)
+				}
+				if strings.Contains(l, " 005 ") && strings.Contains(l, "NICKLEN=") {
+					if !strings.Contains(l, " "+tc.want+" ") {
+						t.Fatal(l)
+					}
+					return
+				}
+			}
+		})
+	}
+}

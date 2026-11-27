@@ -47,6 +47,9 @@ type Config struct {
 	// OnReady, when set, is called once the node is connected and clients
 	// are about to be accepted.
 	OnReady func()
+	// LongNicks makes nicks the nodes' long names rather than their short
+	// names.
+	LongNicks bool
 	// History is how many messages are kept per channel and per DM peer
 	// for clients that connect later (default 100; negative: none).
 	History int
@@ -177,7 +180,7 @@ func (s *Server) applyState(st *device.State) []nickChange {
 	first := s.dir == nil
 	if first {
 		s.self = st.MyInfo.GetMyNodeNum()
-		s.dir = newDirectory(s.self)
+		s.dir = newDirectory(s.self, s.cfg.LongNicks)
 		s.members = newMembership(s.cfg.Active)
 		if s.cfg.StateDir != "" {
 			s.statePath = filepath.Join(s.cfg.StateDir, fmt.Sprintf("members-%08x.json", s.self))
