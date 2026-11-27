@@ -107,7 +107,9 @@ func (s *Server) markMessage(c *client, e histEntry, batch string) (m irc.Messag
 	if !ok {
 		return irc.Message{}, false
 	}
-	tags := map[string]string{"+draft/reply": e.ID, "+draft/react": e.Mark.Emoji}
+	// +reply is what the react spec pairs +draft/react with; some clients
+	// still read only the older +draft/reply.
+	tags := map[string]string{"+reply": e.ID, "+draft/reply": e.ID, "+draft/react": e.Mark.Emoji}
 	if c.caps[capServerTime] {
 		tags["time"] = e.Mark.At.Format(serverTimeFormat)
 	}

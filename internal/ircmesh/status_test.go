@@ -9,9 +9,12 @@ import (
 	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
 )
 
-// reaction matches the TAGMSG that marks message id with emoji.
+// reaction matches the TAGMSG that marks message id with emoji. It refers
+// to id with both +reply, which the react spec pairs it with, and the older
+// +draft/reply.
 func reaction(emoji, id, rest string) string {
-	return `^@\+draft/react=` + emoji + `;\+draft/reply=` + regexp.QuoteMeta(id) + rest
+	id = regexp.QuoteMeta(id)
+	return `^@\+draft/react=` + emoji + `;\+draft/reply=` + id + `;\+reply=` + id + rest
 }
 
 func TestDeliveredDMGetsCheckMark(t *testing.T) {
