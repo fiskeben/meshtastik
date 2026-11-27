@@ -42,8 +42,9 @@ type Config struct {
 	Log      io.Writer     // default io.Discard
 	Now      func() time.Time
 	// SendInterval (default 2s) is the least time between packets sent;
-	// DMTimeout (default 30s) how long a direct message waits for its ack.
-	SendInterval, DMTimeout time.Duration
+	// AckTimeout (default 30s) how long a direct message waits for its ack,
+	// or a channel message for the node's implicit ack.
+	SendInterval, AckTimeout time.Duration
 	// OnReady, when set, is called once the node is connected and clients
 	// are about to be accepted.
 	OnReady func()
@@ -68,8 +69,8 @@ func (c *Config) defaults() {
 	if c.SendInterval == 0 {
 		c.SendInterval = 2 * time.Second
 	}
-	if c.DMTimeout == 0 {
-		c.DMTimeout = 30 * time.Second
+	if c.AckTimeout == 0 {
+		c.AckTimeout = 30 * time.Second
 	}
 	if c.History == 0 {
 		c.History = historyPerKey

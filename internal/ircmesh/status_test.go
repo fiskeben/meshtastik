@@ -86,13 +86,69 @@ func TestEveryPartGetsItsReaction(t *testing.T) {
 	c.expect(reaction("✅", second, ` `))
 }
 
-func TestChannelMessagesGetNoReaction(t *testing.T) {
+func TestChannelMessageGetsDeliveredMark(t *testing.T) {
+	d := newFake()
+	d.ImplicitAckTexts = true
+	h := newHarness(t, d, nil)
+	c := h.dial(t)
+	c.registerCaps("echo-message message-tags")
+	c.send("PRIVMSG #Ryfylke :hei")
+	id := c.expect(`^@msgid=(\S+) :Ricco!ab2c9b0a@mesh PRIVMSG #Ryfylke :?hei$`)[1]
+	c.expect(reaction("✅", id, ` :Ricco!ab2c9b0a@mesh TAGMSG #Ryfylke$`))
+}
+
+func TestChannelMessageWithoutImplicitAckGetsNoReaction(t *testing.T) {
 	h := newHarness(t, newFake(), nil)
 	c := h.dial(t)
 	c.registerCaps("echo-message message-tags")
 	c.send("PRIVMSG #Ryfylke :hei")
-	texts(t, h.d, 1)
-	c.expectNone(`TAGMSG`, 500*time.Millisecond)
+	c.expect(`^@msgid=\S+ :Ricco!ab2c9b0a@mesh PRIVMSG #Ryfylke :?hei$`)
+	c.expectNone(`TAGMSG`, 600*time.Millisecond)
+}
+
+func TestEveryChannelPartGetsItsReaction(t *testing.T) {
+	d := newFake()
+	d.ImplicitAckTexts = true
+	h := newHarness(t, d, nil)
+	c := h.dial(t)
+	c.registerCaps("echo-message message-tags")
+	c.send("PRIVMSG #Ryfylke :%s", strings.TrimSpace(strings.Repeat("word ", 60)))
+	first := c.expect(`^@msgid=(\S+) :Ricco!ab2c9b0a@mesh PRIVMSG #Ryfylke :word`)[1]
+	second := c.expect(`^@msgid=(\S+) :Ricco!ab2c9b0a@mesh PRIVMSG #Ryfylke :word`)[1]
+	c.expect(reaction("✅", first, ` :Ricco!ab2c9b0a@mesh TAGMSG #Ryfylke$`))
+	c.expect(reaction("✅", second, ` :Ricco!ab2c9b0a@mesh TAGMSG #Ryfylke$`))
+}
+
+func TestChannelReactionReplayed(t *testing.T) {
+	d := newFake()
+	d.ImplicitAckTexts = true
+	h := newHarness(t, d, nil)
+	a := h.dial(t)
+	a.registerCaps("echo-message message-tags")
+	a.send("PRIVMSG #Ryfylke :hei")
+	id := a.expect(`^@msgid=(\S+) `)[1]
+	a.expect(`TAGMSG`)
+
+	b := h.dial(t)
+	b.registerCaps("message-tags server-time")
+	b.expect(`msgid=` + regexp.QuoteMeta(id) + `;time=\S+ :Ricco!ab2c9b0a@mesh PRIVMSG #Ryfylke :?hei$`)
+	b.expect(reaction("✅", id, `;time=\S+ :Ricco!ab2c9b0a@mesh TAGMSG #Ryfylke$`))
+}
+
+func TestChannelReactionInChathistory(t *testing.T) {
+	d := newFake()
+	d.ImplicitAckTexts = true
+	h := newHarness(t, d, nil)
+	c := h.dial(t)
+	c.registerCaps("echo-message " + allCaps)
+	c.send("PRIVMSG #Ryfylke :hei")
+	id := c.expect(`msgid=(\S+);time=\S+ :Ricco!ab2c9b0a@mesh PRIVMSG #Ryfylke`)[1]
+	c.expect(`TAGMSG`)
+	c.send("CHATHISTORY LATEST #Ryfylke * 10")
+	ref := c.expect(`BATCH \+(\S+) chathistory #Ryfylke$`)[1]
+	c.expect(`^@batch=` + ref + `;msgid=` + regexp.QuoteMeta(id) + `;time=\S+ :Ricco!ab2c9b0a@mesh PRIVMSG #Ryfylke :?hei$`)
+	c.expect(reaction("✅", id, `;batch=`+ref+`;time=\S+ :Ricco!ab2c9b0a@mesh TAGMSG #Ryfylke$`))
+	c.expect(`^:ircmesh BATCH -` + ref + `$`)
 }
 
 func TestReactionReplayed(t *testing.T) {

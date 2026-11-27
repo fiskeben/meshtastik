@@ -93,6 +93,7 @@ Run `ircmesh --device <name>` (or `--host`/`--port`/`--ble`) and repeat with eac
 - [ ] Every channel is joined (`#LongFast` or the primary's name, plus private channels), and each topic shows its index, preset and key type.
 - [ ] Channel member lists match which nodes the Android app shows on each channel.
 - [ ] A message in a channel from the phone app or another node shows up from the right nick. A message sent from IRC arrives on the other device.
+- [ ] Optional, with a client that shows reactions (gamja, Goguma): a channel message sent from IRC gets ✅ once a neighbouring node relays it, and a "not sent" notice when no neighbour does (a one-node mesh never gets ✅).
 - [ ] `/msg <nick> hi` arrives as a direct message. A DM to a node that is off gives a "not delivered" notice within about 30 s.
 - [ ] Optional, with a client that shows reactions (gamja, Goguma): a DM to a node that is on gets ✅ on the message, and one to a node that is off gets ❌ along with the notice. What you send shows up once, not twice (`echo-message`).
 - [ ] `/me waves` arrives as `* <nick> waves`. A reaction and a reply from the app show up quoted.
