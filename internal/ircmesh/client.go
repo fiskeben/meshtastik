@@ -321,7 +321,7 @@ func (s *Server) welcome(c *client) {
 	n("002", fmt.Sprintf("Your host is %s, running version %s", serverName, s.cfg.Version))
 	n("003", "This server was created "+s.started.Format(time.RFC1123))
 	n("004", serverName, s.cfg.Version, "i", "nt")
-	n("005", "CHANTYPES=#", fmt.Sprintf("NICKLEN=%d", nickLen), "CHANNELLEN=32", "CASEMAPPING=ascii",
+	n("005", "CHANTYPES=#", fmt.Sprintf("NICKLEN=%d", nickLimit(s.cfg.LongNicks)), "CHANNELLEN=32", "CASEMAPPING=ascii",
 		"NETWORK=mesh", fmt.Sprintf("CHATHISTORY=%d", chathistoryMax), "MSGREFTYPES=msgid,timestamp",
 		"are supported by this server")
 	n("375", "- "+serverName+" Message of the day -")

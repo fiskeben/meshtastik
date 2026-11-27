@@ -25,12 +25,13 @@ type dirEntry struct {
 // gets a suffix from its node number. The connected node never does.
 type directory struct {
 	self   uint32
+	long   bool // nicks are long names rather than short names
 	nodes  map[uint32]*dirEntry
 	byNick map[string]uint32 // folded nick → node
 }
 
-func newDirectory(self uint32) *directory {
-	return &directory{self: self, nodes: map[uint32]*dirEntry{}, byNick: map[string]uint32{}}
+func newDirectory(self uint32, long bool) *directory {
+	return &directory{self: self, long: long, nodes: map[uint32]*dirEntry{}, byNick: map[string]uint32{}}
 }
 
 // set records a node's names and returns the nicks that changed as a result.
@@ -43,7 +44,7 @@ func (d *directory) set(num uint32, u *pb.User) []nickChange {
 	if u != nil || e.user == nil {
 		e.user = u
 	}
-	base := baseNick(e.user, num)
+	base := baseNick(e.user, num, d.long)
 	if e.nick != "" && base == e.base {
 		return nil
 	}
@@ -75,7 +76,8 @@ func (d *directory) set(num uint32, u *pb.User) []nickChange {
 // free is base if no other node holds it, else base with the last 4 hex
 // digits of num, else with all 8.
 func (d *directory) free(num uint32, base string) string {
-	for _, n := range []string{base, cut(base, nickLen-5) + "-" + hex4(num), cut(base, nickLen-9) + fmt.Sprintf("-%08x", num)} {
+	limit := nickLimit(d.long)
+	for _, n := range []string{base, cut(base, limit-5) + "-" + hex4(num), cut(base, limit-9) + fmt.Sprintf("-%08x", num)} {
 		if holder, ok := d.byNick[irc.Fold(n)]; !ok || holder == num {
 			return n
 		}

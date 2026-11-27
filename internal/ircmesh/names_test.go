@@ -22,22 +22,44 @@ func TestBaseNick(t *testing.T) {
 		{&pb.User{ShortName: "[x]"}, 1, "[x]"},
 	}
 	for _, c := range cases {
-		if got := baseNick(c.u, c.num); got != c.want {
+		if got := baseNick(c.u, c.num, false); got != c.want {
 			t.Errorf("baseNick(%v) = %q, want %q", c.u, got, c.want)
 		}
 	}
 }
 
 func TestBaseNickLeadingDigit(t *testing.T) {
-	if got := baseNick(&pb.User{ShortName: "1c70"}, 1); got != "_1c70" {
+	if got := baseNick(&pb.User{ShortName: "1c70"}, 1, false); got != "_1c70" {
 		t.Errorf("got %q", got)
 	}
-	if got := baseNick(&pb.User{ShortName: "-ab"}, 1); got != "_-ab" {
+	if got := baseNick(&pb.User{ShortName: "-ab"}, 1, false); got != "_-ab" {
 		t.Errorf("got %q", got)
 	}
-	long := baseNick(&pb.User{ShortName: "🥸", LongName: "1234567890123456789"}, 1)
+	long := baseNick(&pb.User{ShortName: "🥸", LongName: "1234567890123456789"}, 1, false)
 	if long != "_123456789012345" {
 		t.Errorf("got %q", long)
+	}
+}
+
+func TestBaseNickLong(t *testing.T) {
+	cases := []struct {
+		u    *pb.User
+		num  uint32
+		want string
+	}{
+		{&pb.User{ShortName: "AS02", LongName: "Arve Tak"}, 1, "Arve_Tak"},
+		{&pb.User{ShortName: "1d2f", LongName: "Meshtastic 1d2f"}, 1, "Meshtastic_1d2f"},
+		{&pb.User{ShortName: "AS02"}, 1, "AS02"},
+		{&pb.User{ShortName: "AS02", LongName: "🙂"}, 1, "AS02"},
+		{&pb.User{ShortName: "🥸", LongName: "🙂"}, 0xab2c9b0a, "n9b0a"},
+		{nil, 0x1bf0411d, "n411d"},
+		{&pb.User{ShortName: "1B", LongName: "1st Base"}, 1, "_1st_Base"},
+		{&pb.User{LongName: "Stavanger Harbour Repeater Station North"}, 1, "Stavanger_Harbour_Repeater_Stati"},
+	}
+	for _, c := range cases {
+		if got := baseNick(c.u, c.num, true); got != c.want {
+			t.Errorf("baseNick(%v, long) = %q, want %q", c.u, got, c.want)
+		}
 	}
 }
 

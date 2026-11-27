@@ -4,6 +4,7 @@
 package ircmesh
 
 import (
+	"cmp"
 	"fmt"
 	"strings"
 
@@ -12,8 +13,20 @@ import (
 	"meshtastik/internal/irc"
 )
 
-// nickLen is the longest nick, advertised as NICKLEN.
-const nickLen = 16
+// The longest nick, advertised as NICKLEN: 16 when nicks are short names,
+// 32 when they are long names (up to 39 bytes on the node).
+const (
+	nickLen     = 16
+	longNickLen = 32
+)
+
+// nickLimit is the longest nick when nicks are long names or not.
+func nickLimit(long bool) int {
+	if long {
+		return longNickLen
+	}
+	return nickLen
+}
 
 // hex4 is the last four hex digits of a node number.
 func hex4(num uint32) string { return fmt.Sprintf("%04x", num&0xffff) }
@@ -43,12 +56,14 @@ func cut(s string, n int) string {
 }
 
 // baseNick is the nick a node asks for: its short name, else its long name
-// (spaces as _), else n and the last 4 hex digits of its number, each
-// stripped to what IRC allows.
-func baseNick(u *pb.User, num uint32) string {
-	n := keep(u.GetShortName(), nickRune)
-	if n == "" {
-		n = keep(strings.ReplaceAll(u.GetLongName(), " ", "_"), nickRune)
+// (spaces as _), or the other way round with long, else n and the last 4
+// hex digits of its number, each stripped to what IRC allows.
+func baseNick(u *pb.User, num uint32, long bool) string {
+	short := keep(u.GetShortName(), nickRune)
+	longName := keep(strings.ReplaceAll(u.GetLongName(), " ", "_"), nickRune)
+	n := cmp.Or(short, longName)
+	if long {
+		n = cmp.Or(longName, short)
 	}
 	if n == "" {
 		return "n" + hex4(num)
@@ -56,7 +71,7 @@ func baseNick(u *pb.User, num uint32) string {
 	if c := n[0]; (c >= '0' && c <= '9') || c == '-' {
 		n = "_" + n // a nick may not start with a digit or -
 	}
-	return cut(n, nickLen)
+	return cut(n, nickLimit(long))
 }
 
 // presetName is the modem preset as the apps show it (LONG_FAST: LongFast),
