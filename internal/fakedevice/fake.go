@@ -42,8 +42,9 @@ type Device struct {
 	Silent          bool // never answer want_config
 	StaleCompleteID bool // send one config_complete_id with a wrong nonce first
 	AckTexts        bool // answer a direct text message with a ROUTING_APP ack from the destination
-	// ImplicitAckTexts: answer a direct text message with a NONE ROUTING_APP
-	// reply from the local node, as firmware does when it hears a rebroadcast.
+	// ImplicitAckTexts: answer a text message sent with want_ack with a NONE
+	// ROUTING_APP reply from the local node, as firmware does when it hears
+	// a neighbour rebroadcast the packet.
 	ImplicitAckTexts bool
 	AckError         pb.Routing_Error // error_reason of the AckTexts reply (default NONE)
 
@@ -484,15 +485,14 @@ func (d *Device) Texts() []*pb.MeshPacket {
 	return out
 }
 
-// ackText answers a direct text packet as configured by ImplicitAckTexts
-// and AckTexts; false when the link is gone.
+// ackText answers a text packet as configured by ImplicitAckTexts (a NONE
+// ROUTING_APP reply from the local node for a packet sent with want_ack, as
+// firmware does when it hears a neighbour rebroadcast it) and AckTexts (a
+// direct message's ack from the destination); false when the link is gone.
 func (d *Device) ackText(l *link, p *pb.MeshPacket) bool {
 	d.mu.Lock()
 	ack, implicit, reason, num := d.AckTexts, d.ImplicitAckTexts, d.AckError, d.NodeNum
 	d.mu.Unlock()
-	if p.GetTo() == 0xffffffff {
-		return true
-	}
 	reply := func(from uint32, reason pb.Routing_Error) bool {
 		payload, err := proto.Marshal(&pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: reason}})
 		if err != nil {
@@ -503,8 +503,11 @@ func (d *Device) ackText(l *link, p *pb.MeshPacket) bool {
 		}}}
 		return l.emit(&pb.FromRadio{PayloadVariant: &pb.FromRadio_Packet{Packet: pkt}})
 	}
-	if implicit && !reply(num, pb.Routing_NONE) {
+	if implicit && p.GetWantAck() && !reply(num, pb.Routing_NONE) {
 		return false
+	}
+	if p.GetTo() == 0xffffffff {
+		return true
 	}
 	return !ack || reply(p.GetTo(), reason)
 }

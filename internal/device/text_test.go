@@ -8,6 +8,7 @@ import (
 	"time"
 
 	pb "buf.build/gen/go/meshtastic/protobufs/protocolbuffers/go/meshtastic"
+	"google.golang.org/protobuf/proto"
 
 	"meshtastik/internal/fakedevice"
 )
@@ -44,14 +45,64 @@ func TestSendTextNoAck(t *testing.T) {
 	}
 }
 
-func TestSendTextBroadcastNoWait(t *testing.T) {
+func TestSendTextBroadcastNoImplicitAck(t *testing.T) {
+	c := openFake(t, fakedevice.New())
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := c.SendText(ctx, "hi", Broadcast, 0, true); !errors.Is(err, ErrNoAck) {
+		t.Fatal(err)
+	}
+}
+
+func TestSendTextBroadcastImplicitAck(t *testing.T) {
 	d := fakedevice.New()
+	d.ImplicitAckTexts = true
 	c := openFake(t, d)
 	if err := c.SendText(context.Background(), "hi", Broadcast, 0, true); err != nil {
 		t.Fatal(err)
 	}
+	if p := d.Texts()[0]; !p.WantAck {
+		t.Fatal("broadcast did not ask for an ack, so firmware would not report the implicit ack")
+	}
+}
+
+func TestSendTextBroadcastNoWait(t *testing.T) {
+	d := fakedevice.New()
+	c := openFake(t, d)
+	if err := c.SendText(context.Background(), "hi", Broadcast, 0, false); err != nil {
+		t.Fatal(err)
+	}
 	if p := d.Texts()[0]; p.WantAck {
 		t.Error("broadcast asked for ack")
+	}
+}
+
+func TestSendTextBroadcastDeliveryFailed(t *testing.T) {
+	d := fakedevice.New()
+	c := openFake(t, d)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	res := make(chan error, 1)
+	go func() { res <- c.SendText(ctx, "hi", Broadcast, 0, true) }()
+	var sent *pb.MeshPacket
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+		if ps := d.Texts(); len(ps) > 0 {
+			sent = ps[0]
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if sent == nil {
+		t.Fatal("text never reached the node")
+	}
+	payload, err := proto.Marshal(&pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: pb.Routing_MAX_RETRANSMIT}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Inject(&pb.MeshPacket{From: d.NodeNum, To: d.NodeNum, PayloadVariant: &pb.MeshPacket_Decoded{Decoded: &pb.Data{
+		Portnum: pb.PortNum_ROUTING_APP, Payload: payload, RequestId: sent.GetId()}}})
+	if err := <-res; err == nil || !strings.Contains(err.Error(), "MAX_RETRANSMIT") {
+		t.Fatal(err)
 	}
 }
 

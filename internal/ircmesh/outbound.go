@@ -129,8 +129,8 @@ func (j sendJob) key() histKey {
 func closing(ctx context.Context) bool { return errors.Is(ctx.Err(), context.Canceled) }
 
 // sender sends queued messages to m one packet at a time, at least
-// SendInterval apart, until ctx ends or q is closed. Direct messages wait
-// for their ack in the background.
+// SendInterval apart, until ctx ends or q is closed. Each message waits for
+// its ack in the background.
 func (s *Server) sender(ctx context.Context, m Mesh, q <-chan sendJob) {
 	var last time.Time
 	for {
@@ -163,12 +163,12 @@ func (s *Server) sender(ctx context.Context, m Mesh, q <-chan sendJob) {
 			}
 			last = time.Now()
 			id, msgid := job.ids[i], job.msgids[i]
-			if job.to != device.Broadcast {
-				s.wg.Add(1)
-				go func() {
-					defer s.wg.Done()
-					ctx, cancel := context.WithTimeout(ctx, s.cfg.DMTimeout)
-					defer cancel()
+			s.wg.Add(1)
+			go func() {
+				defer s.wg.Done()
+				ctx, cancel := context.WithTimeout(ctx, s.cfg.AckTimeout)
+				defer cancel()
+				if job.to != device.Broadcast {
 					err := m.SendTextID(ctx, id, part, job.to, 0, true)
 					if err != nil && (errors.Is(err, context.Canceled) || closing(ctx)) {
 						return
@@ -181,17 +181,22 @@ func (s *Server) sender(ctx context.Context, m Mesh, q <-chan sendJob) {
 						return
 					}
 					s.setMark(job.key(), msgid, markDelivered, job.to)
-				}()
-				continue
-			}
-			sctx, cancel := context.WithTimeout(ctx, s.cfg.DMTimeout)
-			err := m.SendTextID(sctx, id, part, device.Broadcast, uint32(job.channel), false)
-			cancel()
-			if err != nil && ctx.Err() == nil {
+					return
+				}
+				// A channel message is marked once the node hears a neighbour
+				// relay it (the firmware's implicit ack): it reached the mesh.
+				err := m.SendTextID(ctx, id, part, device.Broadcast, uint32(job.channel), true)
+				if err != nil && (errors.Is(err, context.Canceled) || closing(ctx)) {
+					return
+				}
 				s.mu.Lock()
-				s.toChannel(job.channel, s.notice(job.target, "not sent: "+err.Error()))
-				s.mu.Unlock()
-			}
+				defer s.mu.Unlock()
+				if err != nil {
+					s.toChannel(job.channel, s.notice(job.target, "not sent: "+err.Error()))
+					return
+				}
+				s.setMark(job.key(), msgid, markDelivered, s.self)
+			}()
 		}
 	}
 }

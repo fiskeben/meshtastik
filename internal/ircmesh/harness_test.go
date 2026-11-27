@@ -68,7 +68,7 @@ func testConfig(d *fakedevice.Device, dir string) Config {
 		},
 		StateDir:     dir,
 		SendInterval: 20 * time.Millisecond,
-		DMTimeout:    300 * time.Millisecond,
+		AckTimeout:   300 * time.Millisecond,
 	}
 }
 

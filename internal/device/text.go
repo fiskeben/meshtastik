@@ -12,8 +12,10 @@ import (
 // Broadcast is the destination of a message for every node.
 const Broadcast = 0xffffffff
 
-// ErrNoAck means a direct message was sent but no acknowledgement arrived
-// before the context deadline.
+// ErrNoAck means a message was sent but no acknowledgement arrived before
+// the context deadline: a direct message's ack from the recipient, or a
+// channel message's implicit ack, which the node reports after hearing a
+// neighbour relay the packet.
 var ErrNoAck = errors.New("no acknowledgement")
 
 // ErrImplicitAck accompanies ErrNoAck when the local node reported hearing a
@@ -23,7 +25,10 @@ var ErrImplicitAck = errors.New("relayed by the mesh (implicit ack) but not conf
 
 // SendText sends text to node to on channel. A direct message (to !=
 // Broadcast) asks for an ack; with waitAck SendText waits for the mesh's
-// routing reply, returning ErrNoAck when ctx's deadline passes first.
+// routing reply, returning ErrNoAck when ctx's deadline passes first. With
+// waitAck on a channel (to == Broadcast), it asks for the firmware's
+// implicit ack and waits for the node to hear a neighbour relay the packet,
+// which means it reached the mesh; no implicit ack also ends in ErrNoAck.
 func (c *Client) SendText(ctx context.Context, text string, to uint32, channel uint32, waitAck bool) error {
 	return c.SendTextID(ctx, randomID(), text, to, channel, waitAck)
 }
@@ -49,7 +54,7 @@ func (c *Client) SendTextID(ctx context.Context, id uint32, text string, to uint
 	}
 	direct := to != Broadcast
 	var responses chan *pb.MeshPacket
-	if waitAck && direct {
+	if waitAck {
 		responses = c.addWaiter(id)
 		defer c.removeWaiter(id)
 	}
@@ -58,7 +63,7 @@ func (c *Client) SendTextID(ctx context.Context, id uint32, text string, to uint
 		To:       to,
 		Channel:  channel,
 		Id:       id,
-		WantAck:  direct,
+		WantAck:  direct || waitAck,
 		HopLimit: c.hopLimit(),
 		PayloadVariant: &pb.MeshPacket_Decoded{Decoded: &pb.Data{
 			Portnum: pb.PortNum_TEXT_MESSAGE_APP,
@@ -88,6 +93,11 @@ func (c *Client) SendTextID(ctx context.Context, id uint32, text string, to uint
 			}
 			if r.GetErrorReason() != pb.Routing_NONE {
 				return fmt.Errorf("delivery failed: %s", r.GetErrorReason())
+			}
+			if !direct {
+				// For a broadcast, any NONE reply is the node's implicit ack:
+				// it heard a neighbour relay the packet, so it reached the mesh.
+				return nil
 			}
 			if p.GetFrom() == to {
 				return nil

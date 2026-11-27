@@ -41,7 +41,7 @@ func TestChannelSend(t *testing.T) {
 	c.register("foo")
 	c.send("PRIVMSG #Ryfylke :hei")
 	p := texts(t, h.d, 1)[0]
-	if p.GetChannel() != 4 || p.GetTo() != device.Broadcast || payload(p) != "hei" {
+	if p.GetChannel() != 4 || p.GetTo() != device.Broadcast || payload(p) != "hei" || !p.GetWantAck() {
 		t.Fatal(p)
 	}
 }
