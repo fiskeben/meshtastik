@@ -27,6 +27,7 @@ type Mesh interface {
 	Listen(ctx context.Context, fn func(*pb.FromRadio) error) error
 	SendTextID(ctx context.Context, id uint32, text string, to, channel uint32, waitAck bool) error
 	Refresh(ctx context.Context) error
+	EditNodeDB(ctx context.Context, op device.NodeOp, num uint32) error
 	Close() error
 }
 
@@ -92,6 +93,7 @@ type Server struct {
 	lora      *pb.Config_LoRaConfig
 	names     map[int]string       // channel index → #name
 	dbHeard   map[uint32]time.Time // last_heard from the node DB
+	favorites map[uint32]bool      // nodes marked as favourites in the node DB
 	history   *history
 	batches   uint64 // batch references handed out
 	recent    *recent
@@ -99,6 +101,7 @@ type Server struct {
 	statePath string
 	dirty     bool          // memberships changed since last saved
 	sendQ     chan sendJob  // to the current sender; nil while the link is down
+	editQ     chan nodeEdit // to the current editor; nil while the link is down
 	up        bool          // the node connection is working
 	downSince time.Time     // when it stopped, while !up
 	refreshC  chan struct{} // asks the refresher to re-read the node's state
@@ -110,7 +113,7 @@ func New(cfg Config) *Server {
 	cfg.defaults()
 	// msgids differ from those of an earlier run, which clients may hold
 	prefix := strconv.FormatInt(time.Now().UnixMilli(), 36) + "-"
-	return &Server{cfg: cfg, names: map[int]string{}, dbHeard: map[uint32]time.Time{}, refreshC: make(chan struct{}, 1),
+	return &Server{cfg: cfg, names: map[int]string{}, dbHeard: map[uint32]time.Time{}, favorites: map[uint32]bool{}, refreshC: make(chan struct{}, 1),
 		history: newHistory(cfg.History, prefix), recent: newRecent(1000), clients: map[*client]struct{}{}}
 }
 
@@ -191,9 +194,13 @@ func (s *Server) applyState(st *device.State) []nickChange {
 	}
 	s.firmware = st.Metadata.GetFirmwareVersion()
 	changes := s.dir.set(s.self, st.Self().GetUser())
+	s.favorites = map[uint32]bool{}
 	for _, num := range slices.Sorted(maps.Keys(st.Nodes)) {
 		if num != s.self {
 			changes = append(changes, s.dir.set(num, st.Nodes[num].GetUser())...)
+			if st.Nodes[num].GetIsFavorite() {
+				s.favorites[num] = true
+			}
 		}
 		if lh := st.Nodes[num].GetLastHeard(); lh != 0 {
 			s.dbHeard[num] = time.Unix(int64(lh), 0)

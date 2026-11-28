@@ -387,8 +387,8 @@ func (s *Server) welcome(c *client) {
 	n("001", "Welcome to the mesh, "+nick)
 	n("002", fmt.Sprintf("Your host is %s, running version %s", serverName, s.cfg.Version))
 	n("003", "This server was created "+s.started.Format(time.RFC1123))
-	n("004", serverName, s.cfg.Version, "i", "nt")
-	n("005", "CHANTYPES=#", fmt.Sprintf("NICKLEN=%d", nickLimit(s.cfg.LongNicks)), "CHANNELLEN=32", "CASEMAPPING=ascii",
+	n("004", serverName, s.cfg.Version, "i", "mntv", "v")
+	n("005", "CHANTYPES=#&", "PREFIX=(v)+", "CHANMODES=b,,,mnt", fmt.Sprintf("NICKLEN=%d", nickLimit(s.cfg.LongNicks)), "CHANNELLEN=32", "CASEMAPPING=ascii",
 		"NETWORK=mesh", fmt.Sprintf("CHATHISTORY=%d", chathistoryMax), "MSGREFTYPES=msgid,timestamp",
 		"are supported by this server")
 	n("375", "- "+serverName+" Message of the day -")
@@ -400,7 +400,7 @@ func (s *Server) welcome(c *client) {
 	if irc.Fold(c.nick) != irc.Fold(nick) {
 		c.queue(irc.Message{Prefix: fmt.Sprintf("%s!%08x@mesh", c.nick, s.self), Command: "NICK", Params: []string{nick}})
 	}
-	for _, i := range s.indexes() {
+	for _, i := range s.channels() {
 		s.joinBurst(c, i)
 	}
 	s.sendHistory(c)
@@ -408,19 +408,19 @@ func (s *Server) welcome(c *client) {
 
 // joinBurst joins c to channel index i: JOIN, topic and names.
 func (s *Server) joinBurst(c *client, i int) {
-	name := s.names[i]
+	name := s.chanName(i)
 	c.queue(irc.Message{Prefix: s.dir.mask(s.self), Command: "JOIN", Params: []string{name}})
-	c.queue(s.numeric(c, "332", name, channelTopic(s.chans[i], s.lora)))
+	c.queue(s.numeric(c, "332", name, s.chanTopic(i)))
 	s.sendNames(c, i)
 }
 
 // sendNames sends the members of channel index i: the IRC user, then the
-// nodes heard there.
+// nodes in it, favourites with their + prefix.
 func (s *Server) sendNames(c *client, i int) {
-	name := s.names[i]
+	name := s.chanName(i)
 	nicks := []string{s.selfNick()}
-	for _, num := range s.members.members(i) {
-		nicks = append(nicks, s.dir.nick(num))
+	for _, num := range s.chanMembers(i) {
+		nicks = append(nicks, s.prefix(num)+s.dir.nick(num))
 	}
 	var line []string
 	size := 0

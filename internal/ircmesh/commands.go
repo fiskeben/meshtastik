@@ -43,7 +43,7 @@ func (s *Server) cmdJoin(c *client, m irc.Message) {
 		return
 	}
 	if m.Params[0] == "0" {
-		for _, i := range s.indexes() {
+		for _, i := range s.channels() {
 			if !c.parted[i] {
 				s.part(c, i, "")
 			}
@@ -51,7 +51,7 @@ func (s *Server) cmdJoin(c *client, m irc.Message) {
 		return
 	}
 	for name := range strings.SplitSeq(m.Params[0], ",") {
-		i, ok := s.channelIndex(name)
+		i, ok := s.findChannel(name)
 		switch {
 		case !ok:
 			c.queue(s.numeric(c, "403", name, "No such channel"))
@@ -64,7 +64,7 @@ func (s *Server) cmdJoin(c *client, m irc.Message) {
 
 func (s *Server) part(c *client, i int, reason string) {
 	c.parted[i] = true
-	p := []string{s.names[i]}
+	p := []string{s.chanName(i)}
 	if reason != "" {
 		p = append(p, reason)
 	}
@@ -76,12 +76,12 @@ func (s *Server) cmdPart(c *client, m irc.Message) {
 		return
 	}
 	for name := range strings.SplitSeq(m.Params[0], ",") {
-		i, ok := s.channelIndex(name)
+		i, ok := s.findChannel(name)
 		switch {
 		case !ok:
 			c.queue(s.numeric(c, "403", name, "No such channel"))
 		case c.parted[i]:
-			c.queue(s.numeric(c, "442", s.names[i], "You're not on that channel"))
+			c.queue(s.numeric(c, "442", s.chanName(i), "You're not on that channel"))
 		default:
 			s.part(c, i, param(m, 1))
 		}
@@ -90,7 +90,7 @@ func (s *Server) cmdPart(c *client, m irc.Message) {
 
 func (s *Server) cmdNames(c *client, m irc.Message) {
 	if len(m.Params) == 0 {
-		for _, i := range s.indexes() {
+		for _, i := range s.channels() {
 			if !c.parted[i] {
 				s.sendNames(c, i)
 			}
@@ -98,7 +98,7 @@ func (s *Server) cmdNames(c *client, m irc.Message) {
 		return
 	}
 	for name := range strings.SplitSeq(m.Params[0], ",") {
-		if i, ok := s.channelIndex(name); ok {
+		if i, ok := s.findChannel(name); ok {
 			s.sendNames(c, i)
 		} else {
 			c.queue(s.numeric(c, "366", name, "End of /NAMES list."))
@@ -108,9 +108,9 @@ func (s *Server) cmdNames(c *client, m irc.Message) {
 
 func (s *Server) cmdList(c *client, m irc.Message) {
 	c.queue(s.numeric(c, "321", "Channel", "Users  Name"))
-	for _, i := range s.indexes() {
-		n := 1 + len(s.members.members(i))
-		c.queue(s.numeric(c, "322", s.names[i], fmt.Sprint(n), channelTopic(s.chans[i], s.lora)))
+	for _, i := range s.channels() {
+		n := 1 + len(s.chanMembers(i))
+		c.queue(s.numeric(c, "322", s.chanName(i), fmt.Sprint(n), s.chanTopic(i)))
 	}
 	c.queue(s.numeric(c, "323", "End of /LIST"))
 }
@@ -119,29 +119,36 @@ func (s *Server) cmdTopic(c *client, m irc.Message) {
 	if !s.needParams(c, m, 1) {
 		return
 	}
-	i, ok := s.channelIndex(m.Params[0])
+	i, ok := s.findChannel(m.Params[0])
 	switch {
 	case !ok:
 		c.queue(s.numeric(c, "403", m.Params[0], "No such channel"))
+	case len(m.Params) > 1 && i == favChan:
+		c.queue(s.numeric(c, "482", favName, "The topic counts the favourite nodes and can't be set"))
 	case len(m.Params) > 1:
 		c.queue(s.numeric(c, "482", s.names[i], "The topic describes the channel on the node and can't be set"))
 	default:
-		c.queue(s.numeric(c, "332", s.names[i], channelTopic(s.chans[i], s.lora)))
+		c.queue(s.numeric(c, "332", s.chanName(i), s.chanTopic(i)))
 	}
 }
 
-// whoLine is a 352 reply for node num seen in channel ch ("*" for none).
+// whoLine is a 352 reply for node num seen in channel ch ("*" for none),
+// with its prefix (+ for a favourite) in a channel.
 func (s *Server) whoLine(c *client, ch string, num uint32) irc.Message {
-	return s.numeric(c, "352", ch, fmt.Sprintf("%08x", num), "mesh", serverName, s.dir.nick(num), "H",
+	flags := "H"
+	if ch != "*" {
+		flags += s.prefix(num)
+	}
+	return s.numeric(c, "352", ch, fmt.Sprintf("%08x", num), "mesh", serverName, s.dir.nick(num), flags,
 		"0 "+s.dir.realname(num))
 }
 
 func (s *Server) cmdWho(c *client, m irc.Message) {
 	mask := param(m, 0)
-	if i, ok := s.channelIndex(mask); ok {
-		c.queue(s.whoLine(c, s.names[i], s.self))
-		for _, num := range s.members.members(i) {
-			c.queue(s.whoLine(c, s.names[i], num))
+	if i, ok := s.findChannel(mask); ok {
+		c.queue(s.whoLine(c, s.chanName(i), s.self))
+		for _, num := range s.chanMembers(i) {
+			c.queue(s.whoLine(c, s.chanName(i), num))
 		}
 	} else if num, ok := s.dir.lookup(mask); ok {
 		c.queue(s.whoLine(c, "*", num))
@@ -178,8 +185,8 @@ func (s *Server) cmdWhois(c *client, m irc.Message) {
 	var chans []string
 	if num == s.self {
 		c.queue(s.numeric(c, "312", nick, serverName, "this node"))
-		for _, i := range s.indexes() {
-			chans = append(chans, s.names[i])
+		for _, i := range s.channels() {
+			chans = append(chans, s.chanName(i))
 		}
 	} else {
 		info := "never heard"
@@ -188,8 +195,8 @@ func (s *Server) cmdWhois(c *client, m irc.Message) {
 			info = "last heard " + ago(s.cfg.Now().Sub(last))
 		}
 		c.queue(s.numeric(c, "312", nick, serverName, info))
-		for _, i := range s.members.channels(num) {
-			chans = append(chans, s.names[i])
+		for _, i := range s.nodeChannels(num) {
+			chans = append(chans, s.prefix(num)+s.chanName(i))
 		}
 		if !last.IsZero() {
 			idle := int64(s.cfg.Now().Sub(last).Seconds())
@@ -207,17 +214,15 @@ func (s *Server) cmdMode(c *client, m irc.Message) {
 		return
 	}
 	target := m.Params[0]
-	if strings.HasPrefix(target, "#") {
-		i, ok := s.channelIndex(target)
+	if isChannel(target) {
+		i, ok := s.findChannel(target)
 		switch {
 		case !ok:
 			c.queue(s.numeric(c, "403", target, "No such channel"))
 		case len(m.Params) == 1:
-			c.queue(s.numeric(c, "324", s.names[i], "+nt"))
-		case strings.Trim(m.Params[1], "+") == "b":
-			c.queue(s.numeric(c, "368", s.names[i], "End of channel ban list"))
+			c.queue(s.numeric(c, "324", s.chanName(i), chanModes(i)))
 		default:
-			c.queue(s.numeric(c, "482", s.names[i], "Channel modes follow the node and can't be changed"))
+			s.channelMode(c, i, m.Params[1], m.Params[2:])
 		}
 		return
 	}

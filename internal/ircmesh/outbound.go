@@ -66,6 +66,10 @@ func (s *Server) cmdPrivmsg(c *client, m irc.Message) {
 	if text == "" {
 		return
 	}
+	if i, ok := s.findChannel(target); ok && i == favChan {
+		c.queue(s.numeric(c, "404", favName, "Cannot send to channel (it lists the favourite nodes)"))
+		return
+	}
 	job := sendJob{to: device.Broadcast}
 	if strings.HasPrefix(target, "#") {
 		i, ok := s.channelIndex(target)

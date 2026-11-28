@@ -220,13 +220,14 @@ func isTimeout(err error) bool {
 }
 
 // register signs on as nick and waits for the end of the welcome burst
-// (the last channel's end of NAMES).
+// (the end of NAMES of &Favorites, the last channel).
 func (c *ircClient) register(nick string) {
 	c.t.Helper()
 	c.send("NICK %s", nick)
 	c.send("USER u 0 * :real name")
 	c.expect(` 376 `)
 	c.expect(` 366 \S+ #Ryfylke `)
+	c.expect(` 366 \S+ &Favorites `)
 }
 
 // rx is a text packet received over the radio on channel ch.

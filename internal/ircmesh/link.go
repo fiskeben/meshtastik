@@ -39,7 +39,7 @@ func (s *Server) meshOptions() device.Options {
 			}
 			st := m.State()
 			s.mu.Lock()
-			s.syncState(st)
+			s.syncState(st, "")
 			s.linkUp()
 			s.mu.Unlock()
 		},
@@ -86,14 +86,19 @@ func (s *Server) superviseMesh(ctx context.Context, m Mesh) {
 	for {
 		mctx, cancel := context.WithCancel(ctx)
 		q := make(chan sendJob, sendQueueLen)
+		eq := make(chan nodeEdit, editQueueLen)
 		s.mu.Lock()
-		s.mesh, s.sendQ = m, q
+		s.mesh, s.sendQ, s.editQ = m, q, eq
 		s.mu.Unlock()
 		var wg sync.WaitGroup
-		wg.Add(2)
+		wg.Add(3)
 		go func() {
 			defer wg.Done()
 			s.sender(mctx, m, q)
+		}()
+		go func() {
+			defer wg.Done()
+			s.editor(mctx, m, eq)
 		}()
 		go func() {
 			defer wg.Done()
@@ -110,8 +115,9 @@ func (s *Server) superviseMesh(ctx context.Context, m Mesh) {
 		cancel()
 		wg.Wait()
 		s.mu.Lock()
-		s.sendQ = nil
+		s.sendQ, s.editQ = nil, nil
 		s.dropQueued(q)
+		s.dropEdits(eq)
 		if ctx.Err() != nil {
 			s.mu.Unlock()
 			return // shutdown closes the connection
@@ -126,7 +132,7 @@ func (s *Server) superviseMesh(ctx context.Context, m Mesh) {
 		}
 		st := m.State()
 		s.mu.Lock()
-		s.syncState(st)
+		s.syncState(st, "")
 		s.linkUp()
 		s.mu.Unlock()
 	}
@@ -183,7 +189,7 @@ func (s *Server) refresher(ctx context.Context, m Mesh) {
 		}
 		st := m.State()
 		s.mu.Lock()
-		s.syncState(st)
+		s.syncState(st, "")
 		s.mu.Unlock()
 	}
 }
@@ -203,10 +209,11 @@ func (s *Server) ager(ctx context.Context) {
 }
 
 // syncState takes a fresh copy of the node's state and tells clients what
-// changed: renamed nodes, and channels removed, added or renamed. The
-// caller holds s.mu.
-func (s *Server) syncState(st *device.State) {
-	old := maps.Clone(s.names)
+// changed: renamed nodes, channels removed, added or renamed, and
+// favourites. by is the mask of whoever changed the favourites, or "" when
+// they changed on the node. The caller holds s.mu.
+func (s *Server) syncState(st *device.State, by string) {
+	old, oldFav := maps.Clone(s.names), s.favorites
 	s.nickChanges(s.applyState(st))
 	selfMask := s.dir.mask(s.self)
 	for _, i := range slices.Sorted(maps.Keys(old)) {
@@ -238,4 +245,5 @@ func (s *Server) syncState(st *device.State) {
 			}
 		}
 	}
+	s.favoriteChanges(oldFav, by)
 }

@@ -92,6 +92,7 @@ Run `ircmesh --device <name>` (or `--host`/`--port`/`--ble`) and repeat with eac
 - [ ] The client registers and is renamed to the node's nick. With an emoji short name, the long name is used.
 - [ ] Every channel is joined (`#LongFast` or the primary's name, plus private channels), and each topic shows its index, preset and key type.
 - [ ] Channel member lists match which nodes the Android app shows on each channel.
+- [ ] Favourite nodes show as `+nick` in the channels they're in, and `&Favorites` lists every favourite. `/mode #<channel> +v <nick>` makes a node a favourite (the app's node list shows the star after it re-reads), and `/kick &Favorites <nick>` removes it; both show up as MODE/JOIN/KICK lines. A favourite set in the app shows up within 10 minutes. A message to `&Favorites` is refused.
 - [ ] A message in a channel from the phone app or another node shows up from the right nick. A message sent from IRC arrives on the other device.
 - [ ] `/msg <nick> hi` arrives as a direct message. A DM to a node that is off gives a "not delivered" notice within about 30 s.
 - [ ] Optional, with a client that shows reactions (gamja, Goguma): a DM to a node that is on gets ✅ on the message, and one to a node that is off gets ❌ along with the notice. What you send shows up once, not twice (`echo-message`).

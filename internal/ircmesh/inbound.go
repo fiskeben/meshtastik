@@ -29,6 +29,9 @@ func (s *Server) packet(p *pb.MeshPacket) {
 	if ch, ok := counts(p, s.self); ok {
 		if _, known := s.names[ch]; known && s.heard(from, ch) {
 			s.toChannel(ch, irc.Message{Prefix: s.dir.mask(from), Command: "JOIN", Params: []string{s.names[ch]}})
+			if s.favorites[from] {
+				s.toChannel(ch, irc.Message{Prefix: serverName, Command: "MODE", Params: []string{s.names[ch], "+v", s.dir.nick(from)}})
+			}
 		}
 	}
 	if d.GetPortnum() == pb.PortNum_TEXT_MESSAGE_APP {
@@ -222,11 +225,13 @@ func (s *Server) age() {
 	for _, ch := range s.members.expire(s.cfg.Now()) {
 		s.dirty = true
 		mask := s.dir.mask(ch.Node)
+		// a favourite stays in &Favorites, so it only leaves the channel
+		gone := ch.Last && !s.favorites[ch.Node]
 		switch {
-		case ch.Last && !quit[ch.Node]:
+		case gone && !quit[ch.Node]:
 			quit[ch.Node] = true
 			s.toAll(irc.Message{Prefix: mask, Command: "QUIT", Params: []string{"timed out"}})
-		case !ch.Last:
+		case !gone:
 			if name, ok := s.names[ch.Channel]; ok {
 				s.toChannel(ch.Channel, irc.Message{Prefix: mask, Command: "PART",
 					Params: []string{name, "not heard on this channel for " + s.activeText()}})
